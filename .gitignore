@@ -1,0 +1,35 @@
+# 构建产物
+build/
+dist/
+*.app/
+*.iconset/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 运行时状态（本机生成，不入库）
+runtime.json
+*.log
+
+# 系统 / 编辑器
+.DS_Store
+.vscode/
+.idea/
+
+# 工具自身的记忆与缓存
+.workbuddy-ai/
+tools/cache/
+
+# Agent 工作目录与本机凭据
+.codex/
+.agents/
+.cursor/
+.claude/
+.env
+.env.*
+!.env.example
+.credentials.json
+shield.json
+egress.json

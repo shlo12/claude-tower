@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 540" fill="none">
+<defs>
+ <linearGradient id="stone" x1="174" y1="140" x2="322" y2="520" gradientUnits="userSpaceOnUse"><stop stop-color="#3b4359"/><stop offset=".55" stop-color="#202839"/><stop offset="1" stop-color="#0b101c"/></linearGradient>
+ <linearGradient id="side" x1="190" y1="180" x2="275" y2="480" gradientUnits="userSpaceOnUse"><stop stop-color="#667086"/><stop offset="1" stop-color="#222c40"/></linearGradient>
+ <linearGradient id="gold" x1="260" y1="130" x2="260" y2="500" gradientUnits="userSpaceOnUse"><stop stop-color="#e8c783"/><stop offset="1" stop-color="#6d5535"/></linearGradient>
+ <pattern id="brick" width="48" height="32" patternUnits="userSpaceOnUse"><path d="M0 0H48M0 16H48M24 0V16M0 16V32M48 16V32" stroke="#a8b7d1" stroke-opacity=".08"/></pattern>
+</defs>
+<!-- 远处屋脊，中央的阶梯与五层塔身 -->
+<path d="M22 494V410L52 376L82 410V456H110V346L138 316L166 346V494M354 494V346L382 316L410 346V456H438V410L468 376L498 410V494" fill="#101725" stroke="#475069" stroke-opacity=".4"/>
+<path d="M94 510H426L400 494H120Z" fill="#202a3c" stroke="#8d754d" stroke-opacity=".4"/>
+<path d="M158 474V182H362V474Z" fill="url(#stone)" stroke="#636b7e" stroke-opacity=".55"/>
+<path d="M158 182H186V474H158Z" fill="url(#side)" opacity=".55"/>
+<path d="M336 182H362V474H336Z" fill="#101625"/>
+<path d="M158 182H362V474H158Z" fill="url(#brick)"/>
+<path d="M148 184V158H168V172H188V158H208V172H228V158H248V172H272V158H292V172H312V158H332V172H352V158H372V184Z" fill="#4b5265" stroke="#c2a368" stroke-opacity=".7"/>
+<path d="M148 184H372V192H148Z" fill="#151d2d"/>
+<path d="M186 146H334L348 158H172Z" fill="#6d624f" stroke="#e1bd76" stroke-opacity=".75"/>
+<path d="M186 146V136H334V146" fill="#282d3b"/>
+<path d="M180 246H340M180 304H340M180 362H340M180 420H340" stroke="#ae986d" stroke-opacity=".36" stroke-width="3"/>
+<path d="M174 248H346M174 306H346M174 364H346M174 422H346" stroke="#060c18" stroke-width="4"/>
+<!-- 石窗与窗框；亮灯由页面单独叠加 -->
+<g fill="#070d18" stroke="#73809a" stroke-opacity=".5">
+ <path d="M222 216V202Q230 188 238 202V216Z"/><path d="M282 216V202Q290 188 298 202V216Z"/>
+ <path d="M222 274V260Q230 246 238 260V274Z"/><path d="M282 274V260Q290 246 298 260V274Z"/>
+ <path d="M222 332V318Q230 304 238 318V332Z"/><path d="M282 332V318Q290 304 298 318V332Z"/>
+ <path d="M222 390V376Q230 362 238 376V390Z"/><path d="M282 390V376Q290 362 298 376V390Z"/>
+ <path d="M242 474V446Q260 420 278 446V474Z"/>
+</g>
+<path d="M242 474H278V446Q260 420 242 446Z" fill="url(#gold)" opacity=".22"/>
+<g stroke="#c2ac79" stroke-opacity=".23"><path d="M196 194V471M324 194V471"/><path d="M218 474H302L314 484H206L194 494H326L338 504H182L170 514H350L362 524H158"/></g>
+<path d="M120 524H400L418 534H102Z" fill="#111b2c" stroke="#9b8054" stroke-opacity=".3"/>
+<g fill="#dab875" opacity=".6"><rect x="188" y="190" width="3" height="4"/><rect x="328" y="190" width="3" height="4"/><rect x="188" y="418" width="3" height="4"/><rect x="328" y="418" width="3" height="4"/></g>
+</svg>

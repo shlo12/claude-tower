@@ -1,0 +1,10 @@
+Claude Tower · Windows 11 x64 便携版
+1. 将整个 ZIP 解压到可写文件夹，不要直接在压缩包内运行。
+2. 双击 Claude Tower.bat，终端窗口会启动本地服务，浏览器自动打开页面。
+3. 保留终端窗口；关闭窗口会停止程序。runtime、core、web 必须留在原目录。
+自带 Python，不是安装器，也不是独立 EXE。哨兵和 macOS 专用设置在 Windows 不提供。
+若安全软件提示异常，请核对下载来源和 SHA256；不要直接关闭安全软件或为整个目录添加排除规则。
+部分检测需要联网；第三方诊断目标能看到请求出口 IP。本地状态在 %USERPROFILE%\.ccclean。
+清理前查看预览，不留副本项目无法还原。榜单保留作者提供的 35 天个人战绩。
+本包尚未经过真实 Windows 11 实机验收，建议作为 Pre-release 测试。
+第三方 Python 运行时许可证见 runtime\python\LICENSE.txt。

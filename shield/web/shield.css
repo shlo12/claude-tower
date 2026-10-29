@@ -1,0 +1,652 @@
+/* ============================================================
+   Claude Shield · 哨兵
+   ------------------------------------------------------------
+   token 与 web/style.css 的 :root 逐项对齐。两个程序必须看起来是
+   同一个世界观——改了那边记得同步这里，tools/check.py 会比对。
+   ============================================================ */
+
+:root {
+  --bg: #0a0c12;
+  --bg-2: #0e1119;
+  --surface: #161a25;
+  --surface-2: #1c2130;
+  --surface-3: #232a3b;
+  --border: #2a3145;
+  --border-2: #3b445e;
+  --text: #e9edf8;
+  --text-2: #a3adc6;
+  --text-3: #6d7793;
+  --gold: #e0b45c;
+  --gold-2: #f5d189;
+  --accent-soft: rgba(224, 180, 92, .12);
+  --critical: #e05252;
+  --high: #e8813a;
+  --pass: #4fbf7a;
+  --radius: 3px;
+  --shadow: 3px 3px 0 rgba(0, 0, 0, .45);
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+body {
+  /* 和塔一样的暗底网格 + 顶部金色微光，只是浓度更低——
+     popover 只有 348px 宽，同样的强度会显得脏 */
+  background-image:
+    linear-gradient(rgba(255, 255, 255, .016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, .016) 1px, transparent 1px),
+    radial-gradient(420px 260px at 50% -14%, rgba(224, 180, 92, .06), transparent 70%);
+  background-size: 24px 24px, 24px 24px, 100% 100%;
+}
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 12px 10px;
+  height: 100vh;
+}
+
+/* ---------------- 顶栏 ---------------- */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.brand b {
+  font-size: 13px;
+  letter-spacing: .3px;
+  font-weight: 650;
+}
+
+.brand em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 1px;
+}
+
+/* 盾牌标记：和菜单栏图标同一个五边形，纯 CSS 画的 */
+.mark {
+  width: 12px; height: 13px;
+  background: var(--gold);
+  clip-path: polygon(0 0, 100% 0, 100% 52%, 50% 100%, 0 52%);
+  opacity: .9;
+}
+
+.ver {
+  font: 10px/1 var(--mono);
+  color: var(--text-3);
+  letter-spacing: .4px;
+}
+
+/* 顶栏右上角：常驻「打开塔」。塔关掉之后，这个面板是用户唯一
+   还开着的窗口，入口必须在第一眼就能看到的位置。
+   用金底 + 墨迹（和选中的「只观察」同一套），图标是像素塔：
+   塔尖、檐口、拱门照着 app 图标画，窗和门挖空让金底透出来当灯。 */
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+header button.open {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 9px 3px 8px;
+  font: 600 10.5px/1 -apple-system, "PingFang SC", sans-serif;
+  color: #1a1205;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  border: 1px solid rgba(255, 233, 190, .55);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 0 10px rgba(224, 180, 92, .18);
+  cursor: pointer;
+  transition: filter .15s, box-shadow .15s, transform .06s;
+}
+
+header button.open .icon {
+  display: block;
+  flex: none;
+}
+
+header button.open:hover {
+  filter: brightness(1.07);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4), 0 0 14px rgba(224, 180, 92, .34);
+}
+
+header button.open:active {
+  transform: translateY(1px);
+  filter: brightness(.97);
+}
+
+/* ---------------- 主状态 ---------------- */
+
+.state {
+  position: relative;
+  padding: 12px 13px 13px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 左侧那道 2px 竖条是状态色，其余部分保持中性——
+   整块染红会让人以为程序坏了 */
+.state::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--text-3);
+  transition: background .2s;
+}
+
+.state[data-v="safe"]::before   { background: var(--pass); }
+.state[data-v="warn"]::before   { background: var(--gold); }
+.state[data-v="danger"]::before { background: var(--critical); }
+
+.state h1 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: .4px;
+}
+
+.state[data-v="safe"] h1   { color: var(--pass); }
+.state[data-v="warn"] h1   { color: var(--gold); }
+.state[data-v="danger"] h1 { color: var(--critical); }
+
+.state p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+/* ---------------- 缺塔提醒 ---------------- */
+
+/* 只装了哨兵时，面板看起来一切正常，但时区漂移和 UDP 出口根本没法比对。
+   这条横幅必须常驻，直到塔真的写进基线——不能只把两行指标标黄了事。 */
+.tower-warn {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin-top: -2px;
+  padding: 7px 9px 7px 10px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(224, 180, 92, .4);
+  border-left: 2px solid var(--gold);
+  border-radius: var(--radius);
+}
+
+.tower-warn[hidden] { display: none; }
+
+.tower-warn span {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.tower-warn button {
+  flex: none;
+  padding: 5px 9px;
+  font: 600 10.5px/1 -apple-system, "PingFang SC", sans-serif;
+  color: #1a1205;
+  background: var(--gold);
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.tower-warn button:hover { background: var(--gold-2); }
+
+/* ---------------- 指标 ---------------- */
+
+.facts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.facts li {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(42, 49, 69, .6);
+}
+
+/* 每行左边一个状态圈：✓ 正常 / ! 注意 / × 有问题 / – 不适用。
+   没有这个标记时，一行黑字既可能是「好」也可能是「没查」，看不出来。 */
+.facts li::before {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-2);
+  border-radius: 50%;
+  background: rgba(109, 119, 147, .08);
+  color: var(--text-3);
+  font: 700 10px/1 var(--mono);
+  content: "–";
+}
+
+/* 实心圆底 + 深色字形：细边框空心勾在暗色面板上太弱，
+   一眼扫过去分不清是勾还是噪点。 */
+.facts li[data-st="ok"]::before {
+  content: "✓";
+  color: #06120a;
+  background: var(--pass);
+  border-color: var(--pass);
+  box-shadow: 0 0 0 2px rgba(79, 191, 122, .16), 0 0 9px rgba(79, 191, 122, .45);
+}
+
+.facts li[data-st="warn"]::before {
+  content: "!";
+  color: #1a1205;
+  background: var(--gold);
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px rgba(224, 180, 92, .16), 0 0 9px rgba(224, 180, 92, .45);
+}
+
+.facts li[data-st="bad"]::before {
+  content: "×";
+  color: #fff;
+  background: var(--critical);
+  border-color: var(--critical);
+  box-shadow: 0 0 0 2px rgba(224, 82, 82, .18), 0 0 9px rgba(224, 82, 82, .5);
+}
+
+.facts li:last-child { border-bottom: 0; }
+
+/* 11 行连成一片会找不到重点：进程 / 出口 / 解析 / 时间四组之间加一道实线。
+   上面那行的 border-bottom 还在，这两条叠在一起正好比行线重一档。 */
+.facts li.sep { border-top: 1px solid var(--border); }
+.facts li.sep:first-child { border-top: 0; }
+
+.facts span {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: .5px;
+}
+
+.facts b {
+  font: 11.5px/1 var(--mono);
+  font-weight: 500;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.facts b.ok   { color: var(--pass); }
+.facts b.bad  { color: var(--critical); }
+.facts b.warn { color: var(--gold); }
+/* 「未运行」「没查成」这类既不是好也不是坏的值，比正常值再暗一档 */
+.facts b.muted { color: var(--text-3); }
+
+/* 右值偶尔会长（隧道内 · 198.18.2.160），面板宽度是固定的，
+   不允许换行就会把左边的 label 挤没 */
+.facts b {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* 时区漂移时才会出现。写系统设置要管理员密码，所以按钮上就写清楚，
+   别让人点下去才被密码框吓一跳 */
+button.fix {
+  width: 100%;
+  padding: 7px 10px;
+  margin-top: -4px;
+  font: 11.5px/1.3 -apple-system, "PingFang SC", sans-serif;
+  color: var(--gold-2);
+  background: var(--accent-soft);
+  border: 1px solid rgba(224, 180, 92, .45);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+
+button.fix b { font-family: var(--mono); font-weight: 600; }
+
+button.fix:hover { background: rgba(224, 180, 92, .2); border-color: var(--gold); }
+
+button.fix[hidden] { display: none; }
+
+/* ---------------- 值守强度 ---------------- */
+
+/* 这两档不是普通开关：右边那档会在出口断掉时结束 Claude。
+   选中的一档必须足够亮，用户一眼就能确认「现在到底有没有动手的权限」。
+   旧版的淡金底 + 金字在暗面板上太弱，看起来像两个并排的说明文字。 */
+.seg {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.seg button {
+  position: relative;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 17px 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 7px;
+  row-gap: 1px;
+  padding: 4px 7px;
+  text-align: left;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+}
+
+/* 左边图标：只观察是像素眼（行内 SVG），断了就停是盾牌。
+   眼睛和顶栏的塔同一套画法：硬边、方角、关抗锯齿；眼圈中间挖空，
+   底色透出来当眼白，瞳是实心墨块。旧版那圈 1.5px 椭圆描边在 2x 下
+   是平滑的，夹在像素元素里很扎眼。 */
+.ic-eye,
+.ic-lock {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  justify-self: center;
+  /* 未选中也留 3:1 以上：图形是深色底上的小符号，太淡等于没有 */
+  opacity: .8;
+  transition: opacity .15s;
+}
+
+.seg button.on .ic-eye,
+.seg button.on .ic-lock { opacity: 1; }
+
+.seg button::before {
+  content: "";
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  justify-self: center;
+  transition: opacity .15s, filter .15s;
+}
+
+.seg button[data-lv="2"]::before {
+  width: 12px;
+  height: 14px;
+  background: var(--critical);
+  clip-path: polygon(0 0, 100% 0, 100% 52%, 50% 100%, 0 52%);
+  /* .75 是在 bg-2 上算过对比度的临界值（3.2:1），再低就糊进背景 */
+  opacity: .75;
+}
+
+.seg button:hover {
+  background: var(--surface);
+  color: var(--text-2);
+}
+
+.lv-title {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: .3px;
+}
+
+.lv-sub {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 8.5px;
+  line-height: 1.15;
+  color: var(--text-3);
+  letter-spacing: .2px;
+}
+
+/* 观察档：实心金底、深色字。选中时整块亮起来，而不是只把字染黄。 */
+.seg button.on[data-lv="1"] {
+  color: #1a1205;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  border-color: var(--gold);
+  box-shadow: 0 0 12px rgba(224, 180, 92, .22);
+}
+
+.seg button.on[data-lv="1"] .lv-sub { color: rgba(26, 18, 5, .68); }
+
+/* 武装档：暗红玻璃 + 红盾 + 呼吸点。用和「出口已断」同一族的颜色，
+   但底更暗——这是用户自己给的权限，不是正在发生的故障。 */
+.seg button.on[data-lv="2"] {
+  color: #ffb3b3;
+  background: linear-gradient(180deg, rgba(224, 82, 82, .24), rgba(224, 82, 82, .08));
+  border-color: rgba(224, 82, 82, .6);
+  box-shadow: inset 0 0 0 1px rgba(224, 82, 82, .1), 0 0 14px rgba(224, 82, 82, .16);
+}
+
+.seg button.on[data-lv="2"]::before {
+  opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(224, 82, 82, .6));
+}
+
+.seg button.on[data-lv="2"] .lv-sub { color: rgba(255, 179, 179, .72); }
+
+.seg button.on[data-lv="2"]::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--critical);
+  box-shadow: 0 0 6px var(--critical);
+  animation: armed 1.6s ease-in-out infinite;
+}
+
+/* 闸门档：在武装档之上再加一道——红色更实，图标从盾牌换成锁。
+   这是唯一会「不让 Claude 起来」的一档，视觉上必须比武装档更重。 */
+@keyframes armed { 50% { opacity: .3; } }
+
+/* 二次确认：同一个按钮先变成「确认开启」，4 秒内再点一次才真的武装。
+   文案由 JS 换，样式留在这里，两处不会各改一半。 */
+.seg button.asking {
+  color: #ffc6c6;
+  background: rgba(224, 82, 82, .18);
+  border-color: var(--critical);
+}
+
+.seg button.asking .lv-sub { color: #ffb3b3; }
+
+.seg button:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg button.on[data-lv="2"]::after { animation: none; }
+}
+
+.hint {
+  margin: -4px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.hint b { color: var(--gold); font-weight: 600; }
+
+/* ---------------- 操作 ---------------- */
+
+.acts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+button.flat {
+  padding: 6px 0;
+  font: 11px/1 -apple-system, "PingFang SC", sans-serif;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+
+button.flat:hover {
+  border-color: var(--border-2);
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+button.flat.on {
+  border-color: rgba(224, 180, 92, .45);
+  color: var(--gold-2);
+  background: var(--accent-soft);
+}
+
+/* ---------------- 最近 ---------------- */
+
+.hits {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hits h2 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  color: var(--text-3);
+  text-transform: uppercase;
+}
+
+.hits ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  /* 用纵向 flex 是为了让空态能在整块区域里居中；
+     否则「还没有记录」会顶在最上面，下面拖着一大片空白 */
+  display: flex;
+  flex-direction: column;
+}
+
+.hits li {
+  flex: none;
+  display: flex;
+  gap: 7px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-2);
+  border-bottom: 1px solid rgba(42, 49, 69, .45);
+}
+
+.hits li:last-child { border-bottom: 0; }
+
+.hits time {
+  flex: none;
+  font: 10px/1.5 var(--mono);
+  color: var(--text-3);
+}
+
+.hits .k {
+  flex: none;
+  width: 4px;
+  border-radius: 1px;
+  background: var(--text-3);
+}
+
+.hits .k.warn   { background: var(--gold); }
+.hits .k.danger { background: var(--critical); }
+/* 改时区是用户自己做的修复动作，用绿色把它和「出事」区分开 */
+.hits .k.safe   { background: var(--pass); }
+
+.hits .empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: 11px;
+  padding: 6px 0;
+  border: 0;
+}
+
+/* 滚动条收窄，别在暗色面板里横插一道亮条 */
+.hits ul::-webkit-scrollbar { width: 6px; }
+.hits ul::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border-radius: 3px;
+}
+.hits ul::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------- 底栏 ---------------- */
+
+footer {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+footer button {
+  flex: 1;
+  padding: 6px 0;
+  font: 11px/1 -apple-system, "PingFang SC", sans-serif;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+footer button:hover {
+  color: var(--text-2);
+  border-color: var(--border);
+}
+
+footer button#btn-quit:hover { color: var(--critical); }
+
+/* 暂停态整块降饱和：还在跑，但明显不设防了 */
+body.paused .state { opacity: .62; }
+body.paused .facts { opacity: .62; }
+
+.connections-note { font-size: 11px; line-height: 1.5; color: var(--text-3); margin: 0; }

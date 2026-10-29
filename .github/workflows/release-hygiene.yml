@@ -1,0 +1,14 @@
+name: Release hygiene
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/test_release_hygiene.py
+      - run: python tools/check_release.py --source --history --history-content

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Claude Shield</title>
+<link rel="stylesheet" href="shield.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand"><span class="mark"></span><b>Claude Shield</b><em>哨兵</em></div>
+    <div class="head-right">
+      <span class="ver" id="ver">v1.0.0</span>
+      <button class="open" id="btn-open" title="打开 Claude Tower，扫描并更新基线">
+        <svg class="icon" width="11" height="14" viewBox="0 0 11 14" aria-hidden="true"
+             shape-rendering="crispEdges">
+          <path fill="currentColor" fill-rule="evenodd" d="M3 5 v-1 v-1 h1 v-1 h1 v-1 v-1 h1 v1 v1 h1 v1 h1 v1 v1 v1 v1 h1 v1 v1 v1 v1 v1 v1 h1 v1 h-1 h-1 h-1 h-1 h-1 h-1 h-1 h-1 h-1 v-1 h1 v-1 v-1 v-1 v-1 v-1 v-1 h1 v-1 v-1 z M6 5 h-1 v1 v1 h1 v-1 v-1 z M5 13 h1 h1 v-1 v-1 h-1 v-1 h-1 v1 h-1 v1 v1 h1 z"/>
+        </svg>
+        <span>打开塔</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="state" id="state" data-v="idle">
+    <h1 id="st-title">待命</h1>
+    <p id="st-note">正在读取本机状态…</p>
+  </section>
+
+  <div class="tower-warn" id="tower-warn" hidden>
+    <span id="tower-note">没有塔的基线。</span>
+    <button id="btn-tower">打开塔</button>
+  </div>
+
+  <div class="tower-warn" id="drift-warn" hidden>
+    <span id="drift-note">塔留下的设置被改过了。</span>
+    <button id="btn-drift">打开塔</button>
+  </div>
+
+  <div class="tower-warn" id="login-warn" hidden>
+    <span id="login-note">开机自启失效了。</span>
+    <button id="btn-relogin">重新装</button>
+  </div>
+
+  <ul class="facts">
+    <li><span>Claude 进程</span><b id="f-claude">—</b></li>
+    <li class="sep"><span>公网路由</span><b id="f-route">—</b></li>
+    <li><span>TUN 接管</span><b id="f-tun">—</b></li>
+    <li><span>系统代理</span><b id="f-proxy">—</b></li>
+    <li><span>实际连接</span><b id="f-connections">未确认</b></li>
+    <li><span>塔记基线</span><b id="f-egress">—</b></li>
+    <li class="sep"><span>DNS</span><b id="f-dns">—</b></li>
+    <li><span>UDP 出口</span><b id="f-udp">—</b></li>
+    <li><span>传输</span><b id="f-transport">—</b></li>
+    <li class="sep"><span>当前时区</span><b id="f-tz">—</b></li>
+    <li><span>基线时区</span><b id="f-btz">—</b></li>
+    <li class="sep"><span>上次巡检</span><b id="f-at">—</b></li>
+    <li><span>自动更新</span><b id="f-update">—</b></li>
+  </ul>
+
+  <p id="connections-note" class="connections-note">连接采样不能证明全部流量经过代理。</p>
+
+  <button class="fix" id="btn-fixtz" hidden>把时区改回 <b id="fix-tz"></b></button>
+  <button class="fix" id="btn-update" hidden>去塔里更新 <b id="update-ver"></b></button>
+
+  <div class="seg" id="seg" role="group" aria-label="值守强度">
+    <button type="button" data-lv="1" data-name="瞭望" data-sub="仅提醒">
+      <svg class="ic-eye" width="17" height="11" viewBox="0 0 17 11" aria-hidden="true"
+           shape-rendering="crispEdges">
+        <path fill="currentColor" fill-rule="evenodd" d="M13 5 h-1 v-1 h-1 h-1 v1 v1 v1 h-1 h-1 h-1 v-1 v-1 v-1 h-1 h-1 v1 h-1 v1 h1 v1 h1 h1 v1 h1 h1 h1 v-1 h1 h1 v-1 h1 v-1 z M15 7 v1 h-1 v1 h-1 h-1 v1 h-1 h-1 v1 h-1 h-1 h-1 v-1 h-1 h-1 v-1 h-1 h-1 v-1 h-1 v-1 h-1 v-1 h-1 v-1 h1 v-1 h1 v-1 h1 v-1 h1 h1 v-1 h1 h1 v-1 h1 h1 h1 v1 h1 h1 v1 h1 h1 v1 h1 v1 h1 v1 h1 v1 h-1 v1 h-1 z M10 3 h-1 h-1 h-1 v1 h1 h1 h1 v-1 z"/>
+      </svg>
+      <span class="lv-title">瞭望</span>
+      <span class="lv-sub">仅提醒</span>
+    </button>
+    <button type="button" data-lv="2" data-name="戒严" data-sub="启动检查 · 断线急停">
+      <span class="lv-title">戒严</span>
+      <span class="lv-sub">启动检查 · 断线急停</span>
+    </button>
+  </div>
+  <p class="hint" id="lv-hint"></p>
+
+  <div class="acts">
+    <button class="flat" id="btn-now">立即巡检</button>
+    <button class="flat" id="btn-transport">诊断传输</button>
+    <button class="flat" id="btn-login">开机自启</button>
+    <button class="flat" id="btn-log">日志</button>
+  </div>
+
+  <section class="hits">
+    <h2>最近</h2>
+    <ul id="hits"><li class="empty">还没有记录。</li></ul>
+  </section>
+
+  <footer>
+    <button id="btn-pause">暂停 30 分钟</button>
+    <button id="btn-quit">退出哨兵</button>
+  </footer>
+
+</div>
+<script src="shield.js"></script>
+</body>
+</html>

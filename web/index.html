@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Tower · 魔塔试炼</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='3' fill='%230a0c12'/%3E%3Cpath fill='%23e0b45c' d='M4 3h3v2h2V3h3v2h2V3h3v2h2v3h-2v2h1v11H3V10h1V8H2V5h2V3Zm7 7v3h2v-3h-2Zm0 5v5h2v-5h-2Z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-tower" viewBox="0 0 24 24"><path fill="currentColor" d="M4 3h3v2h2V3h3v2h2V3h3v2h2v3h-2v2h1v11H3V10h1V8H2V5h2V3Zm7 7v3h2v-3h-2Zm0 5v5h2v-5h-2Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 4 5.5v6.2c0 4.6 3.2 8.9 8 10.3 4.8-1.4 8-5.7 8-10.3V5.5L12 2Zm-1 13.4-3.2-3.2 1.4-1.4 1.8 1.8 4.4-4.4 1.4 1.4-5.8 5.8Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M20 12a8 8 0 1 1-2.6-5.9M20 4v4h-4"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 1.5 20.5h21L12 2Zm-1 7h2v6h-2V9Zm0 8h2v2h-2v-2Z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="m4 12 5.5 5.5L20 6.5"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Zm0 0L12 12m0 0 9-4.5M12 12v9"/></symbol>
+    <symbol id="i-empty" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4 13h4l2 3h4l2-3h4M4 13V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v7m-16 0v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6"/></symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="brand" id="brand" title="回到标题画面">
+    <div class="logo"><svg><use href="#i-tower"/></svg></div>
+    <span class="brand-name">CLAUDE TOWER</span>
+    <span class="brand-sub">魔塔 · 环境试炼</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn primary" id="btn-scan">
+    <svg><use href="#i-refresh"/></svg><span>重新闯关</span>
+  </button>
+</header>
+
+<main class="wrap">
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="settle">结算</button>
+    <button class="tab" data-tab="tower">魔塔</button>
+    <button class="tab" data-tab="cruise">挑战历史</button>
+    <button class="tab" data-tab="board">勇士榜</button>
+    <button class="tab" data-tab="privacy">隐私设置</button>
+    <button class="tab" data-tab="findings" data-gated="1">魔镜<span class="n" id="tab-n-find">0</span></button>
+    <button class="tab" data-tab="isolation" data-gated="1">分身术</button>
+    <button class="tab" data-tab="checklist" data-gated="1">心魔试炼</button>
+  </nav>
+
+  <!-- ============ 魔塔 ============ -->
+  <section class="panel" id="panel-tower">
+    <div class="tower">
+      <aside class="tower-side">
+        <div class="hud-card" id="hud">
+          <div class="hud-empty"><span class="loading-ring"></span>正在进入魔塔…</div>
+        </div>
+        <div class="spine" id="spine"></div>
+      </aside>
+      <div class="tower-body" id="floor-body">
+        <div class="floor-loading"><span class="loading-ring"></span>正在扫描这一层…</div>
+      </div>
+    </div>
+    <div class="floor-progress" id="floor-progress"></div>
+  </section>
+
+  <!-- ============ 全塔结算 ============ -->
+  <section class="panel active" id="panel-settle">
+    <div class="panel-head settle-head">
+      <div>
+        <div class="ph-kicker">TOWER CLEARANCE</div>
+        <h1>全塔挑战 · 结算</h1>
+        <p id="settle-sub">走完整座塔的检测结果。能在这里一起处理的问题，就别留到下一趟。</p>
+      </div>
+      <div class="ph-side settle-head-actions">
+        <button class="btn" id="settle-rerun"><svg><use href="#i-refresh"/></svg>重新挑战</button>
+        <button class="btn" id="settle-cruise">挑战历史</button>
+      </div>
+    </div>
+    <div id="settle-body"></div>
+  </section>
+
+  <!-- ============ 挑战历史 ============ -->
+  <section class="panel" id="panel-cruise">
+    <div class="panel-head">
+      <div>
+        <div class="ph-kicker">CRUISE LOG</div>
+        <h1>挑战历史</h1>
+        <p id="cruise-sub">每一次全塔挑战的结果与差距。挑战只读检测，不改动真实闯关进度。</p>
+      </div>
+      <div class="ph-side">
+        <button class="btn" id="cruise-settle">查看最近结算</button>
+      </div>
+    </div>
+    <div id="cruise-body"></div>
+  </section>
+
+  <!-- ============ 勇士榜 ============ -->
+  <section class="panel" id="panel-board">
+    <div class="board-head">
+      <div>
+        <div class="board-kicker">CLAUDE 勇士榜</div>
+        <h1 class="board-title">勇士榜 · 生存记录</h1>
+        <p class="board-sub" id="board-sub">击倒塔主后登记战绩，看看谁在这座塔里活得最久。</p>
+      </div>
+      <div class="board-side">
+        <button class="btn" id="board-export"><svg><use href="#i-down"/></svg>导出榜单</button>
+      </div>
+    </div>
+    <div id="board-list">
+      <div class="empty"><svg><use href="#i-empty"/></svg><p>还没有勇士登榜</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 全部检测 ============ -->
+  <section class="panel" id="panel-privacy">
+    <div class="panel-head"><div><h1>遥测隐私设置</h1><p>一次设置，退出本应用后仍保留；无需先闯关。</p></div></div>
+        <div class="card toolcard">
+          <div class="card-head"><h3>持久遥测隐私设置</h3><span class="badge" id="privacy-badge">检查中</span></div>
+          <p class="tool-desc">一次设置，退出本应用后仍保留。关闭默认 Claude Code 配置中的三类上报并启用最小提示词模式（跳过 hooks/skills/MCP/记忆），同时向 hosts 写入已列出的遥测主机规则；无需开发者账号或后台进程。</p>
+          <p class="tool-desc">hosts 对全系统生效，可能影响其他应用；自带 DNS 或代理远端解析可能绕过。仅覆盖列出的主机，不代表所有遥测都已阻断。关闭遥测可能影响 Remote Control 等功能。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="privacy-enable" disabled>一键设置</button>
+            <button class="btn sm ghost" id="privacy-restore" disabled>恢复本工具修改</button>
+          </div>
+          <p class="tool-desc" id="privacy-status">读取设置状态…</p>
+          <div id="privacy-preview" hidden>
+            <p class="tool-desc" id="privacy-preview-text"></p>
+            <pre class="watch-log mono" id="privacy-domains"></pre>
+            <div class="tool-row">
+              <button class="btn sm" id="privacy-confirm">确认并请求管理员授权</button>
+              <button class="btn sm ghost" id="privacy-cancel">取消</button>
+            </div>
+          </div>
+        </div>
+        <div class="card toolcard" id="netcfg-card">
+          <div class="card-head"><h3>出口国家预期（可选）</h3><span class="badge" id="netcfg-badge">未设置</span></div>
+          <p class="tool-desc">填写你实际使用、且当前受支持的国家代码（如 US、JP、SG）。设置后，扫描会在出口国家不一致时给出一项偏高提示；不设置就完全不做国家判断。本工具不会自动切换地区，也不会替你选择国家。</p>
+          <div class="field">
+            <label for="netcfg-country">预期国家代码</label>
+            <input type="text" id="netcfg-country" maxlength="2" placeholder="例如 US" autocomplete="off" spellcheck="false">
+            <span class="help">两位字母，ISO 3166-1 代码；留空并保存即清除。</span>
+          </div>
+          <div class="tool-row">
+            <button class="btn sm" id="netcfg-save">保存预期</button>
+            <button class="btn sm ghost" id="netcfg-clear">清除</button>
+          </div>
+          <p class="tool-desc" id="netcfg-status">读取预期国家…</p>
+        </div>
+        <div class="card toolcard" id="align-card">
+          <div class="card-head"><h3>按出口对齐</h3><span class="badge" id="align-badge">读取中</span></div>
+          <p class="tool-desc">按当前出口建议「预期国家 / 系统时区 / 区域格式 / 首选语言」，逐项勾选、先预览再确认。语言默认不勾选，会影响界面语言，需重新登录或重启应用后生效；不会自动重启。各项可按记录恢复。</p>
+          <p class="tool-desc">时区那一项要管理员授权（密码只出现在系统窗口），取消授权只跳过那一项，其余照常。本工具不会自动改任何东西。</p>
+          <div id="align-rows" class="align-rows"></div>
+          <div class="tool-row">
+            <button class="btn sm" id="align-apply" disabled>预览勾选项</button>
+            <button class="btn sm ghost" id="align-restore" disabled>恢复本工具改过的项</button>
+          </div>
+          <p class="tool-desc" id="align-status">读取出口…</p>
+          <div id="align-preview" hidden>
+            <p class="tool-desc" id="align-preview-text"></p>
+            <pre class="watch-log mono" id="align-plan"></pre>
+            <div class="tool-row">
+              <button class="btn sm" id="align-confirm" disabled>确认执行</button>
+              <button class="btn sm ghost" id="align-cancel">取消</button>
+            </div>
+          </div>
+        </div>
+        <div class="card toolcard" id="region-card">
+          <div class="card-head"><h3>区域格式（AppleLocale）</h3><span class="badge" id="region-badge">读取中</span></div>
+          <p class="tool-desc">网页能直接读到这个值：<code>Intl.DateTimeFormat().resolvedOptions().locale</code> 在 macOS 上就是 AppleLocale。它和出口 IP 摆在一起时，是一条很容易被忽略、又很容易对不上的地域线索。</p>
+          <p class="tool-desc">只改 NSGlobalDomain 的 AppleLocale 一个键：不动系统语言（界面语言仍是你选的），不动时区，也不需要管理员权限。改之前的值会记在 <code>~/.ccclean/region.json</code>（0600），随时可以恢复；重启浏览器或重新登录后生效。</p>
+          <div class="field">
+            <label for="region-target">改成哪个地区</label>
+            <input type="text" id="region-target" maxlength="2" placeholder="例如 US" autocomplete="off" spellcheck="false">
+            <span class="help">两位字母国家代码。要写进去的格式会先显示出来，确认后才改。</span>
+          </div>
+          <div class="tool-row">
+            <button class="btn sm" id="region-apply" disabled>预览并改成这个地区</button>
+            <button class="btn sm ghost" id="region-restore" disabled>恢复原区域格式</button>
+          </div>
+          <p class="tool-desc" id="region-status">读取区域格式…</p>
+          <div id="region-preview" hidden>
+            <p class="tool-desc" id="region-preview-text"></p>
+            <div class="tool-row">
+              <button class="btn sm" id="region-confirm" disabled>确认修改</button>
+              <button class="btn sm ghost" id="region-cancel">取消</button>
+            </div>
+          </div>
+        </div>
+        <div class="card toolcard" id="ipv6-card">
+          <div class="card-head"><h3>IPv6 出口（Wi-Fi）</h3><span class="badge" id="ipv6-badge">检查中</span></div>
+          <p class="tool-desc">代理通常只接管 IPv4。这台机器如果有全局 IPv6 地址和 v6 默认路由，客户端可能绕过代理、从真实 ISP 直连。原检测文章建议在系统层把 IPv6 配置为「关闭」，而不是只关代理。</p>
+          <p class="tool-desc">关闭范围只限 Wi-Fi 网络服务，以太网、VPN、USB 网络等其它服务不动。只改系统 IPv6 配置，不改代理软件里的 ipv6 开关，也不验证代理远端解析；关闭后 IPv6-only 热点会断，依赖 v6 的应用可能受限。随时可恢复为 Automatic。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="ipv6-off" disabled>关闭 Wi-Fi 的 IPv6</button>
+            <button class="btn sm ghost" id="ipv6-restore" disabled>恢复为 Automatic</button>
+          </div>
+          <p class="tool-desc" id="ipv6-status">读取 IPv6 状态…</p>
+          <div id="ipv6-preview" hidden>
+            <p class="tool-desc" id="ipv6-preview-text"></p>
+            <pre class="watch-log mono" id="ipv6-services"></pre>
+            <label class="ipv6-ack" id="ipv6-ack-wrap" hidden><input type="checkbox" id="ipv6-ack"> <span>我明白：关闭后只提供 IPv6 的热点可能连不上，依赖 IPv6 的应用可能受限；其它网络服务不受影响。</span></label>
+            <div class="tool-row">
+              <button class="btn sm" id="ipv6-confirm" disabled>确认关闭 Wi-Fi 并请求管理员授权</button>
+              <button class="btn sm ghost" id="ipv6-cancel">取消</button>
+            </div>
+          </div>
+        </div>
+        <div class="card toolcard" id="proxyfix-card">
+          <div class="card-head"><h3>WebRTC / 置顶分流修复（多客户端）</h3><span class="badge" id="proxyfix-badge">检查中</span></div>
+          <p class="tool-desc">把 Claude 相关域名和 STUN/TURN 端口（3478/5349/19302）写成代理客户端的全局附加规则，排在订阅规则之前，订阅更新后仍保留。只处理这些条目，不动你已有的规则。</p>
+          <p class="tool-desc">支持 FlClash、Clash Verge、ClashX；Shadowrocket、Surge、sing-box、Mihomo Party 只给手动步骤。FlClash / Clash Verge 的写在订阅更新后仍保留，ClashX 直接改当前配置、重下订阅后需再写一次。写入前会退出并重开客户端，代理中断几秒；撤销只删除本工具记录的那几行。不备份整份配置（里面有节点凭据）。必须先预览再确认。</p>
+          <div class="field">
+            <label for="proxyfix-port">STUN/TURN 端口（3478/5349/19302）</label>
+            <select id="proxyfix-port">
+              <option value="proxy">跟着代理组走（要用浏览器 WebRTC 通话就选这个）</option>
+              <option value="reject">直接拒绝（不用 WebRTC 通话时更彻底）</option>
+            </select>
+            <span class="help">拒绝会让这三个端口的 UDP 完全出不去，不存在「代理组不支持 UDP 就漏」；代价是浏览器 WebRTC 通话用不了。</span>
+          </div>
+          <div class="tool-row">
+            <button class="btn sm" id="proxyfix-apply" disabled>预览并写入规则</button>
+            <button class="btn sm ghost" id="proxyfix-undo" disabled>撤销本工具写入</button>
+          </div>
+          <p class="tool-desc" id="proxyfix-status">读取分流规则状态…</p>
+          <pre class="watch-log mono" id="proxyfix-guidance" hidden></pre>
+          <div id="proxyfix-preview" hidden>
+            <p class="tool-desc" id="proxyfix-preview-text"></p>
+            <pre class="watch-log mono" id="proxyfix-rules"></pre>
+            <div class="tool-row">
+              <button class="btn sm" id="proxyfix-confirm" disabled>确认写入并重启客户端</button>
+              <button class="btn sm ghost" id="proxyfix-cancel">取消</button>
+            </div>
+          </div>
+        </div>
+        <div class="card toolcard" id="update-card">
+          <div class="card-head"><h3>自动更新</h3><span class="badge" id="update-badge">读取中</span></div>
+          <p class="tool-desc">更新源是你自己的 GitHub Releases 仓库。保存后塔和哨兵会按间隔检查新版：先下载，逐项核对清单里的体积、SHA256、版本号与代码签名，全部通过才允许安装。</p>
+          <p class="tool-desc">安装必须由你点确认：会退出塔与哨兵、把当前两个应用备份到 ~/.ccclean/update-backup，换上新版后重新拉起。新版起不来或校验不过会自动回滚，旧版原样装回。</p>
+          <div class="field">
+            <label for="update-repo">更新源仓库</label>
+            <input type="text" id="update-repo" maxlength="201" placeholder="owner/claude-tower" autocomplete="off" spellcheck="false">
+            <span class="help">填 owner/repo，仓库必须公开；留空即关闭自动更新，不会联网。</span>
+          </div>
+          <label class="ipv6-ack"><input type="checkbox" id="update-auto" checked> <span>每 12 小时自动检查并下载（不安装）</span></label>
+          <div class="tool-row">
+            <button class="btn sm" id="update-save">保存并检查</button>
+            <button class="btn sm ghost" id="update-check">立即检查</button>
+          </div>
+          <p class="tool-desc" id="update-status">读取更新状态…</p>
+          <p class="tool-desc" id="update-latest" hidden></p>
+          <pre class="watch-log mono" id="update-notes" hidden></pre>
+          <div class="tool-row" id="update-actions" hidden>
+            <button class="btn sm" id="update-install">下载新版</button>
+            <button class="btn sm ghost" id="update-discard">丢弃已下载</button>
+          </div>
+          <p class="tool-desc" id="update-install-note" hidden></p>
+        </div>
+        <div class="card toolcard" id="uninstall-card">
+          <div class="card-head"><h3>卸载本工具</h3><span class="badge" id="uninstall-badge">读取中</span></div>
+          <p class="tool-desc">把本工具自己留下的东西清干净：看门狗与哨兵、开机自启、检测记录与备份、运行时目录、两个应用包。所有删除都移入废纸篓，可以找回。</p>
+          <p class="tool-desc">顺序是固定的：先撤销对系统的改动，再停进程，最后删文件。应用包排在最后——删完这个页面就没了，后面的步骤无法再执行。</p>
+          <div id="uninstall-list" class="uninstall-list"></div>
+          <p class="tool-desc" id="uninstall-total">读取清单…</p>
+          <div class="field">
+            <label for="uninstall-confirm">输入 UNINSTALL 确认</label>
+            <input type="text" id="uninstall-confirm" autocomplete="off" spellcheck="false" placeholder="UNINSTALL" disabled>
+            <span class="help">只有勾选的项目会被处理；没勾的原样保留。</span>
+          </div>
+          <div class="tool-row">
+            <button class="btn sm" id="uninstall-go" disabled>执行卸载</button>
+            <button class="btn sm ghost" id="uninstall-reload">重新读取清单</button>
+          </div>
+          <pre class="watch-log mono" id="uninstall-result" hidden></pre>
+        </div>
+  </section>
+
+  <section class="panel" id="panel-findings">
+    <div class="panel-head">
+      <div>
+        <div class="ph-kicker">THE MIRROR</div>
+        <h1>魔镜</h1>
+        <p>照见这台机器在 Claude 眼里留下的全部痕迹。</p>
+      </div>
+    </div>
+
+    <section class="hero" id="hero">
+      <div class="ring-wrap">
+        <svg class="ring" width="168" height="168" viewBox="0 0 168 168">
+          <circle class="track" cx="84" cy="84" r="72"></circle>
+          <circle class="val" id="ring-val" cx="84" cy="84" r="72" stroke-dasharray="452.4" stroke-dashoffset="452.4"></circle>
+        </svg>
+        <div class="ring-center">
+          <div class="score-num" id="score-num">--</div>
+          <div class="score-den">洁净度 / 100</div>
+          <div class="grade" id="grade">待检测</div>
+        </div>
+      </div>
+      <div class="hero-main">
+        <h1 id="verdict">还没有扫描过这台机器</h1>
+        <p id="verdict-text">检查 Claude 在本机留下的身份指纹、凭据、网络出口与环境一致性。</p>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="hero-side">
+        <div class="kv"><span class="k">出口 IP</span><span class="v mono" id="meta-ip">—</span></div>
+        <div class="kv"><span class="k">系统时区</span><span class="v mono" id="meta-tz">—</span></div>
+        <div class="kv"><span class="k">上次扫描</span><span class="v" id="meta-time">—</span></div>
+      </div>
+    </section>
+
+    <div class="filterbar" id="filterbar" style="margin-top:18px">
+      <button class="fchip on" data-filter="all">全部</button>
+      <button class="fchip" data-filter="risk">只看风险</button>
+      <button class="fchip" data-filter="critical">高危</button>
+      <button class="fchip" data-filter="high">偏高</button>
+      <button class="fchip" data-filter="medium">中等</button>
+      <button class="fchip" data-filter="privacy">遥测隐私</button>
+      <input class="search" id="search" type="text" placeholder="搜索检测项、路径、关键词…">
+    </div>
+    <!-- 选择条：默认一项都不选，勾选/全选都要用户自己按 -->
+    <div class="pickbar" id="pickbar" hidden>
+      <div class="pk-count"><b id="pick-count">0</b><span>项已选</span></div>
+      <div class="pk-hint">默认一项都不勾，只处理你亲手选中的条目 · <em id="pick-sum"></em></div>
+      <div class="pk-acts">
+        <button class="btn sm ghost" id="pick-none">清空</button>
+        <button class="btn sm ghost" id="pick-all">全选可自动处理项</button>
+        <button class="btn sm primary" id="pick-go" disabled>确认清理</button>
+      </div>
+    </div>
+
+    <div id="findings">
+      <div class="empty"><svg><use href="#i-empty"/></svg><p>等待扫描结果</p></div>
+    </div>
+
+    <section class="panel-section" style="margin-top:22px">
+      <h2>咒物架</h2>
+      <div class="toolcards">
+        <div class="card toolcard">
+          <div class="card-head"><h3>观察哨</h3><span class="badge" id="watch-badge">未上线</span></div>
+          <p class="tool-desc">只记录经过此代理的目标主机和时间，标注 Sentry / Datadog 等通道；不解密、不记录请求正文。未观察到连接不代表没有上报，也不能仅凭主机名确认发送了哪些数据。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="watch-toggle">放哨</button>
+            <code class="mono tool-addr" id="watch-addr"></code>
+          </div>
+          <pre class="watch-log mono" id="watch-log"></pre>
+        </div>
+        <div class="card toolcard">
+          <div class="card-head"><h3>遥测封缄</h3></div>
+          <p class="tool-desc">魔镜检测项可分别预览并关闭使用遥测、错误报告和反馈提交（需确认）。也可生成 Datadog 与历史 Sentry / Statsig 主机规则，手动审阅后追加进 /etc/hosts；规则不覆盖所有版本，不能封锁正常 API 主机。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="hosts-block-gen">生成规则文件</button>
+          </div>
+        </div>
+        <div class="card toolcard egress-card">
+          <div class="card-head">
+            <h3>出口足迹</h3>
+            <span class="badge" id="egress-badge">—</span>
+          </div>
+          <p class="tool-desc">
+            每次检测都会记下当时的出口 IP（已打码）、国家与 ASN，只写本机
+            <code>~/.ccclean/egress.json</code>，最多 60 条。「出口漂移」那一关看的就是这张表——
+            单次 IP 再干净，一天里跨两个国家出去，跳变本身就是信号。
+          </p>
+          <div class="tool-row">
+            <button class="btn sm" id="egress-refresh">刷新</button>
+            <span class="tool-addr" id="egress-sum">读取中…</span>
+          </div>
+          <div class="egress-list" id="egress-list"></div>
+        </div>
+        <div class="card toolcard">
+          <div class="card-head"><h3>安全快照</h3><span class="badge" id="snapshot-badge">过滤副本</span></div>
+          <p class="tool-desc">保存 <code>~/.claude</code> 与 <code>~/.claude.json</code> 中可安全复制的文件；
+            缓存、诊断日志、已识别的凭据与含密钥的文件不留副本。不是完整备份，排除项无法还原。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="snapshot-make">拍一张</button>
+            <span class="tool-addr" id="snapshot-status"></span>
+          </div>
+        </div>
+        <div class="card toolcard">
+          <div class="card-head"><h3>备份与还原</h3><span class="badge" id="restore-badge">—</span></div>
+          <p class="tool-desc">清理记录保存在 <code>~/.ccclean/backups/</code>。敏感操作只记录时间、类型和结果，不保存原文；
+            只有留有非敏感副本的项目可以还原，历史版本的旧副本不会自动删除。
+            还原前也会过滤敏感内容；当前文件含凭据时跳过覆盖，其他文件按需留底到 <code>pre-restore/</code>。</p>
+          <div class="tool-row">
+            <button class="btn sm" id="restore-refresh">刷新</button>
+            <span class="tool-addr" id="restore-sum">读取中…</span>
+          </div>
+          <div class="egress-list" id="restore-list"></div>
+        </div>
+        <div class="card toolcard">
+          <div class="card-head"><h3>系统时区</h3><span class="badge" id="tz-badge">—</span></div>
+          <p class="tool-desc">「系统时区」那一关的直达修复：授权后写入系统设置，密码只在系统原生窗口里输入，本应用不接触。
+            改成与出口 IP 一致的城市才算自洽。</p>
+          <div class="tool-row">
+            <select class="btn sm ghost" id="tz-select">
+              <option value="Asia/Taipei">Asia/Taipei（台北）</option>
+              <option value="Asia/Tokyo">Asia/Tokyo（东京）</option>
+              <option value="Asia/Singapore">Asia/Singapore（新加坡）</option>
+              <option value="America/Los_Angeles">America/Los_Angeles（洛杉矶）</option>
+              <option value="America/New_York">America/New_York（纽约）</option>
+              <option value="Europe/London">Europe/London（伦敦）</option>
+            </select>
+            <button class="btn sm" id="tz-apply">授权修改</button>
+            <span class="tool-addr" id="tz-status">读取中…</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============ 隔离 ============ -->
+  <section class="panel" id="panel-isolation">
+    <div class="panel-head">
+      <div>
+        <div class="ph-kicker">THE CLONE</div>
+        <h1>分身术</h1>
+        <p>一个账号一副分身，各自独立的配置目录与时区，互不串味。</p>
+      </div>
+    </div>
+
+    <div class="split">
+      <div>
+        <div class="card" style="margin-bottom:18px">
+          <div class="card-head"><h3>铸造新分身</h3><span class="sub">一个账号一副分身，互不污染</span></div>
+          <div class="form-grid">
+            <div class="field">
+              <label>名称</label>
+              <input type="text" id="pf-name" placeholder="例如 work / test / backup">
+              <span class="help">只用字母数字，会作为目录名</span>
+            </div>
+            <div class="field">
+              <label>时区</label>
+              <input type="text" id="pf-tz" list="tz-list" placeholder="America/Los_Angeles">
+              <datalist id="tz-list">
+                <option value="America/Los_Angeles"></option>
+                <option value="America/New_York"></option>
+                <option value="Europe/London"></option>
+                <option value="Europe/Amsterdam"></option>
+                <option value="Asia/Singapore"></option>
+                <option value="Asia/Tokyo"></option>
+                <option value="UTC"></option>
+              </datalist>
+              <span class="help">建议与出口 IP 所在城市一致</span>
+            </div>
+            <div class="field full">
+              <label>中转地址（可选）</label>
+              <input type="text" id="pf-url" placeholder="留空则直连官方 api.anthropic.com">
+              <span class="help">填写后只在这个配置档里生效，不污染主环境</span>
+            </div>
+            <div class="field full">
+              <label class="checkline"><input type="checkbox" id="pf-docker"> 同时生成 Docker 沙箱（彻底不碰主机文件）</label>
+            </div>
+            <div class="field full">
+              <button class="btn primary" id="btn-profile">铸造分身</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h3>已有分身</h3><span class="sub" id="pf-count">0 个</span></div>
+          <div class="card-body" id="profile-list">
+            <div class="empty"><p>还没有铸造过分身</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card side-card">
+        <div class="summary">
+          <h4>为什么需要分身</h4>
+          <p style="font-size:12.5px;color:var(--text-2);margin:0 0 12px">
+            多个账号共用同一个 <code>CLAUDE_CONFIG_DIR</code> 时，<code>userID</code>、<code>anonymousId</code>
+            与遥测缓存不会随账号切换而重置，服务端仍能把它们串成同一台设备。
+          </p>
+          <div class="divider"></div>
+          <p style="font-size:12.5px;color:var(--text-2);margin:0">
+            生成的启动器会独立设置配置目录、时区，并清掉继承来的密钥变量。用
+            <code>sh run.sh</code> 启动即可。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 清单 ============ -->
+  <section class="panel" id="panel-checklist">
+    <div class="panel-head">
+      <div>
+        <div class="ph-kicker">THE TRIAL</div>
+        <h1>心魔试炼</h1>
+        <p>二十七条自我拷问。做不到的先别勾——知道差在哪，比假装做完有用。这里只做自查记录，不参与闯关判定。</p>
+      </div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress"><i id="ck-bar"></i></div>
+      <div class="progress-num" id="ck-num">0 / 0</div>
+    </div>
+    <div id="checklist"></div>
+  </section>
+
+
+</main>
+
+<!-- 清理确认 -->
+<div class="overlay" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="modal-title">确认净化</h3>
+      <p id="modal-sub">以下内容会被处理，配置类文件会先备份；清理后需要重新执行 <code>claude login</code>。</p>
+    </div>
+    <div class="modal-body">
+      <div class="warn" style="margin-bottom:14px">
+        <svg><use href="#i-alert"/></svg>
+        <div><b>⚠️ 此操作非常危险，可能导致不可逆的数据丢失！</b>请确认列表里没有你还要用的对话记录。</div>
+      </div>
+      <div class="res-list" id="modal-list"></div>
+    </div>
+    <div class="modal-confirm" id="confirm-box">
+      <div class="confirm-label">输入 <code>CLEAN</code> 以确认执行</div>
+      <input class="confirm-input" id="confirm-input" placeholder="CLEAN" autocomplete="off">
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="modal-cancel">取消</button>
+      <button class="btn danger" id="modal-go" disabled>确认净化</button>
+    </div>
+  </div>
+</div>
+
+<!-- 首次启动：免责声明与能力边界 -->
+<div class="notice" id="notice" hidden>
+  <div class="nt-card" role="dialog" aria-modal="true" aria-labelledby="nt-title">
+    <div class="nt-head">
+      <div class="nt-kicker">使 用 前 必 读</div>
+      <h2 id="nt-title">免责声明与能力边界</h2>
+      <p class="nt-sub">这不是一段法律套话。下面把这个工具能做什么、不能做什么，以及为什么谁都不能向你保证结果，逐条说清楚。请读完再开始。</p>
+    </div>
+
+    <div class="nt-body" id="nt-body">
+      <section class="nt-key">
+        <h3><b>01</b>因果不可观测，所以没有人能向你保证<span class="nt-tag">最重要的一条</span></h3>
+        <p>账号处置是<strong>大模型公司的单方面决定</strong>，绝大多数时候不会给出具体理由。这意味着<strong>没有任何人（包括本工具）能证明某一项操作有效或无效</strong>——既无法验证，也无法反证。以下三种情况都真实存在，而且从外部无法区分因果：</p>
+        <ul>
+          <li>有人什么都没改，用了很久也没事；</li>
+          <li>有人严格照着清单逐条改，仍然被封；</li>
+          <li>有人改完第二天就封了——可能只是时间上碰巧。</li>
+        </ul>
+        <p>所以：任何声称「照做就安全」「按这套流程就不会封」的说法，都不成立。本程序也不会这么说。</p>
+      </section>
+
+      <section>
+        <h3><b>02</b>这不是「防封工具」，而且它会真的改你的机器</h3>
+        <p>本程序分两半：<strong>前半段只读</strong>——读取这台机器上已有的配置与文件，对照一份由公开资料整理出来的清单打分；<strong>后半段会写</strong>——在你确认之后，它真的会去改那些文件。</p>
+        <p>它会执行的操作只有下面这几类，没有别的：</p>
+        <ul>
+          <li>改写或删除配置字段；含密钥或令牌的文件<strong>不保留副本</strong></li>
+          <li>缓存、诊断日志、凭据及含令牌的客户端存储<strong>直接删除，不进废纸篓，无法还原</strong>；其他文件按预览处理</li>
+          <li>真正移除 Shell 中选中的密钥赋值行；非敏感配置行按需注释</li>
+          <li>重新生成 <code>~/.claude.json</code> 里的机器标识，让它不再对应本机</li>
+          <li>删除钥匙串里与服务相关的条目——<strong>这一项没有备份，删了就是删了</strong></li>
+          <li>设置或清除环境变量、移除登录启动项</li>
+          <li>修改系统时区（会弹系统授权框，密码得你自己输）</li>
+          <li>关闭或恢复 Wi-Fi 网络服务的 IPv6 配置（会弹系统授权框，记录原状态后可恢复为 Automatic；其它网络服务不动）</li>
+          <li>写入或撤销 FlClash / Clash Verge / ClashX 的分流附加规则（<strong>只在「隐私设置」里，执行前必须预览确认</strong>；会退出并重开对应客户端，撤销只删本工具记录的行；其它客户端只给手动步骤）</li>
+          <li>结束正在运行的 Claude 相关进程</li>
+        </ul>
+        <p>清理前会给你预览清单，并要求输入 <code>CLEAN</code>。<strong>不留副本的项目会明确标出，不可还原。</strong>其他配置按清单保存非敏感副本。还原旧文件时也会检查，拒绝重新引入已识别的缓存、日志或凭据。安全快照不包含这些内容；历史旧备份不会自动删除。</p>
+        <p class="nt-note">它<strong>不修改</strong> Anthropic 的任何设置，<strong>不接触</strong>你的账号，<strong>不代理、不转发</strong>你的任何请求，也<strong>无法影响</strong>服务端的任何判定。所有改动都只发生在你这一侧的机器上。</p>
+        <p class="nt-note">本程序与 Anthropic 没有任何关联，不是官方产品，也未获其认可或授权。「Claude」等名称仅用于说明检测对象。</p>
+      </section>
+
+      <section>
+        <h3><b>03</b>结论只说明「信号密度」，不说明「安全」</h3>
+        <p>清单里每一条建议的本质，都是<strong>少留下一个可被观察到的特征</strong>。改时区、换主机名、删中文输入源、固定出口、关掉 WebRTC——这些动作做与不做，是在减少或增加「被观测到的信息量」，而不是在产生任何形式的「安全」。</p>
+        <p>这两件事必须分开：<strong>信号少 ≠ 不会被封，信号多 ≠ 一定被封。</strong>把它们当成一回事，是这类清单最容易被误读的地方。</p>
+      </section>
+
+      <section>
+        <h3><b>04</b>不要为了「看起来一致」去改真实资料</h3>
+        <p>如果你的时区、语言、输入法、Apple ID 地区、付款方式本来就对应你的真实身份，那就让它们保持真实。为了让几个字段互相自洽而去<strong>伪造或扭曲真实信息</strong>，往往会制造更多不一致——账单地址与支付方式对不上、设备资料与实际使用地长期冲突、注册信息与历史记录矛盾。这类矛盾比「时区是台北」要严重得多。</p>
+        <p>清单里与你实际需求冲突的条目（工作语言必须是中文、家人共用这台电脑、公司统一发的设备、必须用的中文输入法），请<strong>直接忽略</strong>。真实需求优先于表面一致。</p>
+      </section>
+
+      <section>
+        <h3><b>05</b>本工具不提供、也不鼓励任何规避手段</h3>
+        <p>本程序不提供账号共享、代充代付、伪造身份、绕过地区限制、批量注册、自动化刷量等任何做法，也不对这类行为给出建议。清单里的每一条都只是「减少本机可观测特征」，没有一条是「绕过某项限制」。</p>
+        <p>清理会改动你本机的真实配置。如果某项配置对应你的真实工作环境——公司统一发的设备、家人共用的电脑、团队约定的语言、必须装的中文输入法——改动它可能影响正常使用。<strong>只勾选你理解后果的条目。</strong></p>
+        <p>请自行确认你的使用方式符合 Anthropic 的服务条款与你所在地的法律法规。<strong>因使用本程序或采纳其中任何建议而产生的直接或间接后果，由使用者自行承担。</strong></p>
+      </section>
+
+      <section>
+        <h3><b>06</b>数据：读了什么，去了哪里</h3>
+        <ul>
+          <li><strong>主要在本机执行和记录。</strong>本工具不会自动把本地扫描记录上传到项目服务器；部分诊断需要访问第三方服务。</li>
+          <li><strong>会联网的检测：</strong>出口信息与风险查询、DNS / DoH、STUN、固定 HTTPS 连通性诊断及版本查询等，会访问相应第三方服务；配置自动更新后还会访问所选 GitHub 仓库。对方能够看到请求来源的出口 IP，部分查询会发送待检查的 IP 或域名。“本地运行”不等于完全离线。</li>
+          <li><strong>出口历史落在本机：</strong>「出口漂移」这一关需要历史才能判断，因此每次检查会把当时的出口 IP、国家、城市、ASN 记到 <code>~/.ccclean/egress.json</code>（最多保留 60 条）。这个文件只在本机，删掉它漂移记录就清零。</li>
+          <li><strong>凭据与本地文件：</strong>不会把凭据作为诊断请求发送。部分扫描和清理会在本机读取配置原文，以识别密钥并过滤敏感内容；本地记录和备份仍应视为私有资料，不要公开整个 <code>~/.ccclean</code> 目录。</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3><b>07</b>分级与分数只是表达方式</h3>
+        <p>critical / high / medium / low / pass 这五档、通关进度、装备、勇士等级，都是把检查结果<strong>游戏化</strong>的表达。它们不是风险概率，也不是大模型公司的任何真实阈值——这些阈值由本工具自行设定，属于经验判断，没有官方依据。请把它们当作「优先级排序」，而不是「出事概率」。</p>
+        <p>同理，打通全塔<strong>不代表</strong>你安全，卡在某一层也<strong>不代表</strong>你危险。</p>
+      </section>
+
+      <section class="nt-end">
+        <h3><b>08</b>最后</h3>
+        <p>如果你不接受以上任何一条，请不要使用本程序。点击下方按钮，表示你已阅读并理解上述全部内容，并同意自行承担使用后果。</p>
+      </section>
+    </div>
+
+    <div class="nt-foot">
+      <div class="nt-hint" id="nt-hint">请向下滚动读完全文</div>
+      <button class="nt-go" id="nt-go" disabled>我已了解，进入魔塔</button>
+    </div>
+  </div>
+</div>
+
+<!-- 标题画面 -->
+<div class="title" id="title" hidden>
+  <div class="t-sky" aria-hidden="true">
+    <div class="t-stars" id="t-stars"></div>
+    <div class="t-moon"><i></i><i></i><i></i></div>
+    <div class="t-clouds"><i></i><i></i></div>
+  </div>
+  <div class="t-land" aria-hidden="true">
+    <div class="t-ridge rb"></div>
+    <div class="t-ridge rf"></div>
+  </div>
+  <div class="t-layout">
+    <div class="t-scene">
+      <div class="t-glow"></div>
+      <div class="t-tower" id="t-tower"></div>
+      <div class="t-fog"></div>
+    </div>
+    <div class="t-panel" id="t-panel">
+      <div class="t-kicker">克 劳 德 环 境 试 炼</div>
+      <img class="t-sigil" src="/assets/claude-sigil-64.png" alt="" aria-hidden="true">
+      <h1 class="t-logo" aria-label="Claude Tower"><span class="t-logo-art" id="t-logo-art" aria-hidden="true"></span></h1>
+      <div class="t-tagline"><i></i>魔 塔 · 五 层 试 炼<i></i></div>
+      <ul class="t-menu" id="t-menu"></ul>
+      <div class="t-hint">↑ ↓ 选择 · Enter 确认 · 也可以用鼠标</div>
+    </div>
+  </div>
+  <div class="t-embers" id="t-embers" aria-hidden="true"></div>
+  <div class="t-bye" id="t-bye" hidden>
+    <h2>塔门缓缓关闭</h2>
+    <p>勇者，感谢你守护过这座塔。<br>本地服务已经停止，可以直接关闭这个窗口了。</p>
+  </div>
+  <div class="t-ver" id="t-ver">v—</div>
+  <div class="t-copy">本机运行 · 结果不上传 · <button type="button" class="t-legal" id="t-legal">免责声明</button></div>
+</div>
+
+<!-- 勇士营地 -->
+<div class="camp" id="camp" hidden>
+  <div class="camp-card" role="dialog" aria-modal="true" aria-labelledby="camp-title">
+    <button class="camp-close" id="camp-close" aria-label="返回">×</button>
+    <div class="camp-art" aria-hidden="true">
+      <svg viewBox="0 0 96 44" shape-rendering="crispEdges">
+        <g fill="#8fa3d9" opacity=".7">
+          <rect x="9" y="7" width="1" height="1"/><rect x="19" y="4" width="1" height="1"/>
+          <rect x="82" y="6" width="1" height="1"/><rect x="89" y="11" width="1" height="1"/>
+          <rect x="58" y="3" width="1" height="1"/>
+        </g>
+        <g fill="#7b522f">
+          <rect x="36" y="7" width="1" height="28"/>
+          <rect x="34" y="10" width="5" height="2"/>
+          <rect x="32" y="12" width="9" height="2"/>
+          <rect x="30" y="14" width="13" height="2"/>
+          <rect x="28" y="16" width="17" height="2"/>
+          <rect x="26" y="18" width="21" height="2"/>
+          <rect x="24" y="20" width="25" height="2"/>
+          <rect x="22" y="22" width="29" height="2"/>
+          <rect x="20" y="24" width="33" height="2"/>
+          <rect x="18" y="26" width="37" height="2"/>
+          <rect x="16" y="28" width="41" height="2"/>
+          <rect x="14" y="30" width="45" height="2"/>
+          <rect x="12" y="32" width="49" height="2"/>
+          <rect x="10" y="34" width="53" height="2"/>
+        </g>
+        <g fill="#a86b3c">
+          <rect x="34" y="10" width="5" height="2"/>
+          <rect x="30" y="14" width="13" height="2"/>
+          <rect x="26" y="18" width="21" height="2"/>
+          <rect x="22" y="22" width="29" height="2"/>
+          <rect x="18" y="26" width="37" height="2"/>
+          <rect x="14" y="30" width="45" height="2"/>
+          <rect x="10" y="34" width="53" height="2"/>
+        </g>
+        <g fill="#21150f">
+          <rect x="33" y="23" width="7" height="2"/>
+          <rect x="32" y="25" width="9" height="2"/>
+          <rect x="31" y="27" width="11" height="2"/>
+          <rect x="30" y="29" width="13" height="2"/>
+          <rect x="29" y="31" width="15" height="2"/>
+          <rect x="28" y="33" width="17" height="2"/>
+        </g>
+        <g fill="#d8a14e"><rect x="35" y="5" width="3" height="1"/><rect x="38" y="6" width="2" height="1"/></g>
+        <g class="camp-fire">
+          <rect x="69" y="34" width="14" height="2" fill="#5a3a22"/>
+          <rect x="71" y="32" width="10" height="2" fill="#7b522f"/>
+          <rect x="75" y="28" width="4" height="5" fill="#e4673c"/>
+          <rect x="73" y="24" width="6" height="5" fill="#f0a03c"/>
+          <rect x="76" y="20" width="2" height="5" fill="#ffd66b"/>
+          <rect x="74" y="18" width="2" height="2" fill="#e4673c"/>
+        </g>
+        <rect x="6" y="36" width="84" height="1" fill="#2a3a5e"/>
+      </svg>
+    </div>
+    <div class="camp-kicker">勇 士 营 地</div>
+    <h2 id="camp-title">歇脚、反馈、找到我们</h2>
+    <p class="camp-lead">这里是开发者联络处。闯关时遇到的误判、想补充的检测项，或只是想聊聊 Claude 环境，都可以在营地留下话。</p>
+    <div class="camp-rows">
+      <div class="camp-row"><span>微信</span><b>即将开放</b><i>筹备中</i></div>
+      <div class="camp-row"><span>邮箱</span><b>即将开放</b><i>筹备中</i></div>
+      <div class="camp-row"><span>公众号</span><b>即将开放</b><i>筹备中</i></div>
+    </div>
+    <p class="camp-tip">联系方式会在后续版本放进营地。现在遇到问题，可以先导出战报，连同版本号一起保存。</p>
+    <button class="btn primary" id="camp-back">回到营地门口</button>
+  </div>
+</div>
+
+<!-- 战斗演出 -->
+<div class="battle" id="battle" hidden>
+  <div class="battle-inner" id="battle-inner">
+    <div class="battle-top">
+      <span class="b-kicker" id="b-kicker">—</span>
+      <button class="b-x" id="b-close" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="fighter foe" id="b-foe-side">
+        <div class="sprite-wrap" id="b-foe"></div>
+        <div class="fname" id="b-fname">—</div>
+        <div class="hpbar foe"><i id="b-foe-hp"></i><b id="b-foe-hp-t">100</b></div>
+      </div>
+      <div class="vs-mark">VS</div>
+      <div class="fighter me" id="b-me-side">
+        <div class="sprite-wrap" id="b-hero"></div>
+        <div class="fname">你</div>
+        <div class="hpbar me"><i id="b-me-hp"></i><b id="b-me-hp-t">100</b></div>
+      </div>
+    </div>
+
+    <div class="battle-log" id="b-log"></div>
+
+    <div class="battle-result" id="b-result" hidden>
+      <div class="br-head" id="br-head"></div>
+      <div class="br-body" id="br-body"></div>
+    </div>
+
+    <div class="battle-actions" id="b-actions"></div>
+  </div>
+</div>
+
+<!-- 登临塔顶：真实通关触发的可跳过过场 -->
+<div class="finisher" id="finisher" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="fn-l1" aria-describedby="fn-l2 fn-l4">
+  <div class="fn-world" id="fn-world" aria-hidden="true">
+    <div class="fn-sky"></div><div class="fn-dawn"></div>
+    <div class="fn-stars"></div><div class="fn-mountains"></div>
+    <div class="fn-stage">
+      <div class="fn-core" id="fn-core">
+        <div class="fn-halo"></div><div class="fn-halo fn-halo-b"></div>
+        <img class="fn-sigil" src="/assets/claude-sigil-64.png" width="64" height="64" alt="">
+        <span class="fn-core-name">CLAUDE · THE OVERLORD</span>
+      </div>
+      <div class="fn-beam"></div>
+      <div class="fn-tower" id="fn-tower">
+        <img src="/assets/tower-finale.svg" width="520" height="540" alt="">
+        <div class="fn-window" style="--floor:0;--y:69%;--x:44%"></div>
+        <div class="fn-window" style="--floor:0;--y:69%;--x:55.5%"></div>
+        <div class="fn-window" style="--floor:1;--y:58.2%;--x:44%"></div>
+        <div class="fn-window" style="--floor:1;--y:58.2%;--x:55.5%"></div>
+        <div class="fn-window" style="--floor:2;--y:47.5%;--x:44%"></div>
+        <div class="fn-window" style="--floor:2;--y:47.5%;--x:55.5%"></div>
+        <div class="fn-window" style="--floor:3;--y:36.7%;--x:44%"></div>
+        <div class="fn-window" style="--floor:3;--y:36.7%;--x:55.5%"></div>
+        <div class="fn-hero"><span></span><img src="/assets/knight-t3.png" width="64" height="96" alt=""></div>
+      </div>
+      <div class="fn-ground"></div>
+      <div class="fn-embers"><i style="--x:-170px;--delay:0.0s;--size:3px"></i><i style="--x:-99px;--delay:0.37s;--size:2px"></i><i style="--x:-28px;--delay:0.74s;--size:2px"></i><i style="--x:43px;--delay:1.11s;--size:3px"></i><i style="--x:114px;--delay:1.48s;--size:2px"></i><i style="--x:-155px;--delay:1.85s;--size:2px"></i><i style="--x:-84px;--delay:2.22s;--size:3px"></i><i style="--x:-13px;--delay:0.29s;--size:2px"></i><i style="--x:58px;--delay:0.66s;--size:2px"></i><i style="--x:129px;--delay:1.03s;--size:3px"></i><i style="--x:-140px;--delay:1.4s;--size:2px"></i><i style="--x:-69px;--delay:1.77s;--size:2px"></i><i style="--x:2px;--delay:2.14s;--size:3px"></i><i style="--x:73px;--delay:0.21s;--size:2px"></i><i style="--x:144px;--delay:0.58s;--size:2px"></i><i style="--x:-125px;--delay:0.95s;--size:3px"></i><i style="--x:-54px;--delay:1.32s;--size:2px"></i><i style="--x:17px;--delay:1.69s;--size:2px"></i></div>
+      <div class="fn-floor-tag">V <span>塔 顶</span></div>
+    </div>
+  </div>
+  <div class="fn-heading" aria-hidden="true"><span class="fn-mark">V</span><span>CLAUDE TOWER <i>/</i> 试炼终章</span></div>
+  <div class="fn-lines">
+    <p class="fn-kicker">THE SUMMIT · 第五层</p>
+    <p class="fn-l fn-l1" id="fn-l1">恭喜你，勇士。</p>
+    <h1 class="fn-l fn-l2" id="fn-l2">你已登临塔顶</h1>
+    <div class="fn-rule" aria-hidden="true"><i></i><span>✦</span><i></i></div>
+    <p class="fn-l fn-l3">四层试炼，已在身后。</p>
+    <p class="fn-blessing">愿你在 Claude 魔王的注视下，</p>
+    <p class="fn-l fn-l4" id="fn-l4">走得更远，存活更久。</p>
+    <p class="fn-epilogue">通关只是序章，生存仍在继续。</p>
+  </div>
+  <div class="fn-bar fn-bar-t"></div><div class="fn-bar fn-bar-b"></div><div class="fn-vig"></div>
+  <div class="fn-footer" aria-hidden="true"><span>TRIAL COMPLETE</span><span>你的故事 · 仍在继续</span></div>
+  <button class="fn-skip" id="fn-skip" type="button">跳过演出 <span>ESC</span></button>
+</div>
+
+<!-- 通关演出 -->
+<div class="victory" id="victory" hidden>
+  <div class="victory-inner">
+    <div class="v-rays"></div>
+    <div class="v-crown">👑</div>
+    <div class="v-kicker">塔顶 · 生存纪念</div>
+    <h1 class="v-title">勇士，征途未完</h1>
+    <p class="v-sub" id="v-sub">你已登临塔顶。愿你在 Claude 魔王的注视下，长久存活。</p>
+
+    <div class="v-stats" id="v-stats"></div>
+
+    <div class="v-form" id="v-form">
+      <label>勇士名</label>
+      <input type="text" id="v-name" maxlength="24" placeholder="留下你的名字">
+      <label>首次使用 Claude 的日期</label>
+      <input type="date" id="v-since">
+      <div class="v-hint" id="v-hint">存活天数按本地最早痕迹推算，可以手动改成你知道的日期。</div>
+      <div class="v-actions">
+        <button class="btn" id="v-skip">先不上榜</button>
+        <button class="btn primary" id="v-save">登上勇士榜</button>
+      </div>
+    </div>
+
+    <div class="v-done" id="v-done" hidden>
+      <div class="v-rank" id="v-rank"></div>
+      <div class="v-actions">
+        <button class="btn" id="v-close">回到魔塔</button>
+        <button class="btn primary" id="v-board">查看勇士榜</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 自动闯关 · 一屏车轮战 -->
+<div class="auto-arena" id="auto-arena" hidden>
+  <div class="aa-shell">
+    <div class="aa-top">
+      <div class="aa-kicker"><span class="aa-dot"></span>全自动闯关</div>
+      <div class="aa-floor" id="aa-floor">准备中</div>
+      <div class="aa-count">
+        <b id="aa-progress-t">—</b>
+        <i><em id="aa-progress-bar"></em></i>
+      </div>
+      <button class="aa-skip" id="auto-skip">跳过演出</button>
+    </div>
+
+    <div class="aa-scene" id="aa-scene">
+      <div class="aa-backno" id="aa-backno">00</div>
+      <div class="aa-floorline">
+        <b id="aa-floor-name">魔塔</b>
+        <span id="aa-floor-sub">自动推演</span>
+      </div>
+
+      <div class="aa-stage" id="aa-stage">
+        <div class="aa-fighter me" id="aa-hero-side">
+          <div class="aa-sprite" id="aa-hero"></div>
+          <div class="aa-fname">勇者</div>
+          <div class="hpbar me aa-hp"><i id="aa-hero-hp"></i><b id="aa-hero-hp-t">— / —</b></div>
+          <div class="aa-statline" id="aa-hero-sub">—</div>
+        </div>
+        <div class="aa-vs">VS</div>
+        <div class="aa-fighter foe" id="aa-foe-side">
+          <div class="aa-sprite" id="aa-foe"><span class="aa-wait">?</span></div>
+          <div class="aa-fname" id="aa-foe-name">等待入场</div>
+          <div class="hpbar foe aa-hp"><i id="aa-foe-hp"></i><b id="aa-foe-hp-t">—</b></div>
+          <div class="aa-statline" id="aa-foe-sub">怪物会依次上场</div>
+        </div>
+      </div>
+
+      <div class="aa-stamp" id="aa-stamp" hidden></div>
+      <div class="aa-drop" id="aa-drop" hidden>
+        <span class="aa-drop-kicker">宝箱开启</span>
+        <b id="aa-drop-name">—</b>
+        <span id="aa-drop-stat">—</span>
+      </div>
+
+      <div class="aa-intro" id="aa-intro" hidden>
+        <span id="aa-intro-kicker">第 1 层</span>
+        <b id="aa-intro-name">城门</b>
+        <i id="aa-intro-sub">系统地基</i>
+        <p id="aa-intro-story"></p>
+      </div>
+
+      <div class="aa-barrier" id="aa-barrier" hidden>
+        <div class="aa-barrier-card">
+          <div class="aa-barrier-kicker" id="aa-barrier-kicker">检测屏障</div>
+          <div class="aa-barrier-verdict" id="aa-barrier-verdict">检测未通过 · 怪物打不动</div>
+          <p class="aa-barrier-value" id="aa-barrier-value"></p>
+          <p class="aa-barrier-advice" id="aa-barrier-advice"></p>
+          <p class="aa-barrier-extra" id="aa-barrier-extra" hidden></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="aa-rail">
+      <span class="aa-queue-label">本层怪物</span>
+      <div class="aa-queue" id="aa-queue"></div>
+    </div>
+
+    <div class="aa-spine" id="aa-spine"></div>
+
+    <div class="battle-log aa-log" id="aa-log"></div>
+    <div class="aa-foot">
+      <span id="aa-stage-text">准备入场…</span>
+      <span class="aa-rule">检测通过 = 击杀 · 检测不通过 = 打不动</span>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 战斗/推演加载遮罩 -->
+<div class="tl-load" id="tl-load" hidden>
+  <div class="tl-torch"><i></i></div>
+  <p class="tl-text" id="tl-load-text">集结远征队<span class="tl-dots"><b>.</b><b>.</b><b>.</b></span></p>
+  <span class="tl-sub" id="tl-load-sub"></span>
+</div>
+
+<script src="/app.js"></script>
+<script src="/tower.js"></script>
+</body>
+</html>
