@@ -24,7 +24,7 @@ if [ -z "$VERSION" ] || [ -z "$SHIELD_VERSION" ]; then
   exit 1
 fi
 
-echo "→ 构建塔 $VERSION（内含哨兵 $SHIELD_VERSION）"
+echo "→ 构建塔 ${VERSION}（内含哨兵 ${SHIELD_VERSION}）"
 "$DIR/tools/build-app.sh"
 
 OUT="$DIR/dist/release-v$VERSION"
