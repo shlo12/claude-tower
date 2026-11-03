@@ -210,6 +210,31 @@ def _from_items(idx, ids, empty_value="未发现相关问题", empty_detail=""):
     }
 
 
+# 3-4 这一关除了 DNS，还要看两条独立的出口证据：回落组会不会退到直连、
+# 终端里的 curl 从哪出去。它们各有自己的条目，这里只把更严重的那条顶到
+# 卡面上，证据全部保留。
+_PROXY_EXTRAS = ("net.proxy_fallback", "net.terminal_egress")
+
+
+def _merge_proxy_extras(out, idx):
+    extras = [idx.get(i) for i in _PROXY_EXTRAS if idx.get(i)]
+    if not extras:
+        return out
+    worst = max(extras, key=lambda e: SEV_RANK.get(e.get("severity"), 0))
+    if SEV_RANK.get(worst.get("severity"), 0) > SEV_RANK.get(out.get("sev"), 0):
+        out["sev"] = worst.get("severity")
+        out["value"] = worst.get("title") or out.get("value")
+        out["detail"] = " ".join(x for x in (out.get("detail"), worst.get("detail")) if x)
+        out["advice"] = "；".join(x for x in (out.get("advice"), worst.get("advice")) if x)
+    # 卡面自己的证据先留：这两项是补充，不能把「系统 DNS / 解析出口」挤掉。
+    extras.sort(key=lambda e: SEV_RANK.get(e.get("severity"), 0), reverse=True)
+    evidence = list(out.get("evidence") or [])
+    for item in extras:
+        evidence.extend(item.get("evidence") or [])
+    out["evidence"] = evidence[:8]
+    return out
+
+
 def _act(kind, label=None, **extra):
     """一键动作：结算页/战斗结算上的「去处理」按钮。
 
@@ -243,11 +268,14 @@ def _probe_tz(scan, ctx):
 def _probe_lang(scan, ctx):
     idx = _idx(scan)
     lang = (scan.get("system") or {}).get("locale") or "未知"
-    out = _from_items(idx, ["locale.lang", "locale.client_lang"],
-                      f"语言环境 {lang}，与出口区域无明显冲突")
+    ids = ["locale.lang", "locale.client_lang", "locale.browser", "fp.cn_browser"]
+    out = _from_items(idx, ids, f"语言环境 {lang}，与出口区域无明显冲突")
     if out["sev"] != "pass":
-        worst = _worst(idx, ["locale.lang", "locale.client_lang"]) or {}
-        if worst.get("id") == "locale.client_lang":
+        worst = _worst(idx, ids) or {}
+        if worst.get("id") in ("locale.browser", "fp.cn_browser"):
+            # 浏览器有自己的语言列表与 UA，系统「语言与地区」改不到它
+            out["act"] = _act("goto", label="去魔镜看浏览器语言", tab="findings")
+        elif worst.get("id") == "locale.client_lang":
             # 客户端语言在它自己的设置里，系统「语言与地区」改不到
             out["act"] = _act("goto", label="去魔镜看客户端语言", tab="findings")
         else:
@@ -356,7 +384,7 @@ def _probe_identity(scan, ctx):
         _from_items(
             idx,
             ["fp.identity_fields", "fp.claude_json", "fp.email_domain",
-             "fp.fonts", "fp.gpu", "fp.vm"],
+             "fp.fonts", "fp.gpu", "fp.vm", "dev.location"],
             "身份标识字段已清空",
         )
     )
@@ -529,10 +557,21 @@ def _probe_proxy(scan, ctx):
     hijacked = "已被代理接管" in (route.get("title") or "")
     system = [str(x) for x in (pd.get("system") or []) if x]
     sys_dom = [str(x) for x in (pd.get("systemDomestic") or []) if x]
-    proxy_dom = [str(x) for x in (pd.get("domesticDestination") or []) if x]
+    all_dom = [str(x) for x in (pd.get("domesticDestination") or []) if x]
+    proxied_raw = pd.get("domesticProxied")
+    # 旧扫描结果没有拆分字段，按「全部都是代理域名」处理，宁可多报。
+    proxy_dom = [str(x) for x in (all_dom if proxied_raw is None else proxied_raw) if x]
+    direct_dom = [str(x) for x in (pd.get("domesticDirect") or []) if x]
     node_dom = [str(x) for x in (pd.get("domesticNode") or []) if x]
+    policy_dom = [str(x) for x in (pd.get("domesticPolicy") or []) if x]
     proxy_live = SEV_RANK.get(pitem.get("severity"), 0) >= SEV_RANK["medium"]
-
+    resolver = pd.get("resolver") if isinstance(pd.get("resolver"), dict) else {}
+    leaked = bool(resolver.get("checked")
+                  and (resolver.get("country") or "").upper() == "CN")
+    resolver_country = (resolver.get("country") or "").upper()
+    egress_country = (pd.get("egressCountry") or "").upper()
+    mismatch = bool(pd.get("countryMismatch") or (
+        resolver_country and egress_country and resolver_country != egress_country))
     if not pd:
         # 深层检测没产出时退回旧路径：只看扫描到的系统 DNS 文本
         dns = idx.get("net.dns") or {}
@@ -544,8 +583,12 @@ def _probe_proxy(scan, ctx):
         hijacked = False
 
     sys_hit = bool(sys_dom) and not hijacked
+    resolver_who = " · ".join(
+        b for b in (resolver.get("org") or "", resolver.get("masked") or "") if b
+    ) or "未知"
 
-    if not sys_hit and not proxy_live:
+    if not sys_hit and not proxy_live and not leaked:
+        quiet_info = False
         if sys_dom and hijacked:
             out["value"] = ("DNS 已被代理接管（系统配置的 "
                             + "、".join(sys_dom[:2]) + " 不生效）")
@@ -557,13 +600,62 @@ def _probe_proxy(scan, ctx):
                              "打开 TUN 或系统代理后才会生效。")
             if SEV_RANK.get(out.get("sev"), 0) < SEV_RANK["info"]:
                 out["sev"] = "info"
-        if out.get("sev") != "pass" and not out.get("act"):
+        elif policy_dom:
+            quiet_info = True
+            out["value"] = ("代理域名解析只走境外；国内域名交给 "
+                            + "、".join(proxydns.label(v) for v in policy_dom[:3]))
+            out["detail"] = ("nameserver-policy 只把国内域名交给国内解析器，让 GEOIP,CN 拿到"
+                             "国内地址、命中直连规则；代理域名的解析仍走境外名单。")
+            out["sev"] = "info"
+        elif direct_dom:
+            quiet_info = True
+            out["value"] = ("代理域名解析只走境外；直连域名交给 "
+                            + "、".join(proxydns.label(v) for v in direct_dom[:3]))
+            out["detail"] = ("direct-nameserver 里的国内解析器只解析本来就直连的域名；"
+                             "直连流量从本机 IP 发出，解析落回国内不会额外暴露访问目标。")
+            out["sev"] = "info"
+        elif mismatch:
+            quiet_info = True
+            out["value"] = f"解析器出口在 {resolver_country}，出口在 {egress_country}"
+            out["detail"] = ("递归本身不在国内，但解析器与 HTTP 出口不在同一个国家；"
+                             "第三方探针的「DNS 国家」一项会因此变红。想全绿就把 "
+                             "nameserver 换成与出口同区的境外 DoH。")
+            if SEV_RANK.get(out.get("sev"), 0) < SEV_RANK["low"]:
+                out["sev"] = "low"
+        facts = []
+        if system:
+            facts.append({"label": "系统 DNS", "value": "、".join(system[:3]), "mono": True})
+        if resolver.get("checked"):
+            facts.append({"label": "实测解析出口", "value": resolver_who, "mono": True})
+        if mismatch:
+            facts.append({"label": "出口国家",
+                          "value": f"HTTP {egress_country or '?'} · DNS {resolver_country or '?'}",
+                          "mono": True})
+        if policy_dom and policy_dom != proxy_dom:
+            facts.append({"label": "国内域名解析用",
+                          "value": "、".join(proxydns.label(v) for v in policy_dom[:4]),
+                          "mono": True})
+        if direct_dom and not proxy_dom:
+            facts.append({"label": "直连域名解析用",
+                          "value": "、".join(proxydns.label(v) for v in direct_dom[:4]),
+                          "mono": True})
+        if node_dom:
+            facts.append({"label": "代理节点域名用（不算泄漏）",
+                          "value": "、".join(node_dom[:4]), "mono": True})
+        if facts:
+            out["evidence"] = list(out.get("evidence") or []) + facts
+        if out.get("sev") != "pass" and not out.get("act") and not quiet_info:
             out["act"] = _act("open", label="打开「网络」设置", pane="network")
-        return out
+        return _merge_proxy_extras(out, idx)
 
     system_names = "、".join(sys_dom[:2])
     proxy_names = "、".join(proxydns.label(v) for v in proxy_dom[:3])
-    if sys_hit and proxy_live:
+    if leaked and not sys_hit and not proxy_dom:
+        value = f"实测解析出口落在国内（{resolver_who}）"
+        detail = ("nameserver 名单里没有国内解析器，但实测递归出口是 "
+                  f"{resolver_who}：配置干净不等于解析发生在境外，"
+                  "明文 53 可能中途被截获，或上游被转给了国内递归。")
+    elif sys_hit and proxy_live:
         value = f"系统 DNS 与代理 DNS 都在用国内解析器（{system_names} / {proxy_names}）"
         detail = ("TUN 接管后真正解析域名的是代理内核；系统配置和内核 nameserver 里的"
                   "国内解析器都能看到你访问的域名。")
@@ -583,17 +675,30 @@ def _probe_proxy(scan, ctx):
             detail += f"系统里设的是 {'、'.join(system[:2])}，挡不住这条路径。"
     if proxy_live and node_dom:
         detail += "「节点域名用」那一组只解析代理节点地址，不算泄漏，可以保留。"
+    if proxy_live and policy_dom:
+        detail += ("「国内域名用」那一组只解析国内域名，代理域名的解析不受它影响。")
+    if leaked and (sys_hit or proxy_dom):
+        detail += f"实测递归出口是 {resolver_who}，名单改干净也可能被上游接手。"
+    if mismatch:
+        detail += f"本次 HTTP 出口在 {egress_country}，解析器在 {resolver_country}。"
 
     advice = []
     if sys_hit:
         advice.append("把系统 DNS 改成与出口地区一致的服务（1.1.1.1 / 8.8.8.8）")
-    if proxy_live:
+    if proxy_live and proxy_dom:
         advice.append("在客户端 DNS 设置里删掉 nameserver 里的国内解析器，只留境外 DoH/IP；"
                       "节点域名解析可以继续用国内")
+    if leaked:
+        advice.append("换成境外 DoH 后重新扫描，看到「解析出口」变成境外才算修好")
+    if mismatch:
+        advice.append("解析器与出口不同国家时，第三方探针的 DNS 国家一项也会标红；"
+                      "换成与出口同区的境外 DoH 可以一并消掉")
 
     evidence = []
     if system:
         evidence.append({"label": "系统 DNS", "value": "、".join(system[:3]), "mono": True})
+    if leaked:
+        evidence.append({"label": "实测解析出口", "value": resolver_who, "mono": True})
     if sys_hit:
         evidence.append({"label": "系统里命中的国内解析器", "value": "、".join(sys_dom[:3]),
                          "mono": True})
@@ -603,10 +708,18 @@ def _probe_proxy(scan, ctx):
     if node_dom:
         evidence.append({"label": "代理节点域名用（不算泄漏）",
                          "value": "、".join(node_dom[:4]), "mono": True})
+    if policy_dom:
+        evidence.append({"label": "国内域名解析用",
+                         "value": "、".join(proxydns.label(v) for v in policy_dom[:4]),
+                         "mono": True})
     if hijacked:
         evidence.append({"label": "DNS 链路", "value": "TUN 已接管", "mono": True})
+    if mismatch:
+        evidence.append({"label": "出口国家",
+                         "value": f"HTTP {egress_country or '?'} · DNS {resolver_country or '?'}",
+                         "mono": True})
 
-    return {
+    return _merge_proxy_extras({
         "sev": "medium",
         "value": value,
         "detail": detail,
@@ -616,7 +729,7 @@ def _probe_proxy(scan, ctx):
         "fixIds": [],
         "act": (_act("open", label="打开「网络」设置", pane="network") if sys_hit
                 else _act("goto", label="去魔镜看 DNS 证据", tab="findings")),
-    }
+    }, idx)
 
 
 def _probe_hosts(scan, ctx):
@@ -946,11 +1059,12 @@ _F1 = [
         _probe_tz),
     _lv("1-2", "语言与区域", "语言傀儡", "puppet", "#9c7cff",
         "系统语言、区域、键盘布局与输入法，四个来源会一起进入请求与设备画像；"
-        "Claude 客户端还有自己独立的语言设置，不会跟着系统走。",
+        "Claude 客户端和浏览器还各有自己独立的语言设置，都不会跟着系统走。",
         ["系统设置 → 通用 → 语言与地区，把首选语言改成英文",
          "键盘 → 输入法：不需要的中文输入源删掉",
          "终端里的 LANG / LC_ALL 也统一",
-         "客户端设置里单独再改一次界面语言"],
+         "客户端设置里单独再改一次界面语言",
+         "浏览器设置里的语言列表也要单独改，并移到顶部"],
         _probe_lang),
     _lv("1-3", "主机铭牌", "铭牌石像", "statue", "#8c9cc4",
         "主机名会随 mDNS / DHCP 广播，带品牌词或中文时，整台机器的画像更「像国内设备」。",
@@ -974,12 +1088,14 @@ _F2 = [
         "userID、machineID、anonymousId 这些字段写在本地配置里，换账号不会自动重置；"
         "注册邮箱的域名本身也是一条线索。除了这些字段，机器本身也在说话——"
         "随办公软件装进来的中文字体、虚拟显卡的型号字符串、hypervisor 标记，"
-        "都是能读到且不易改的区分度。",
+        "都是能读到且不易改的区分度。定位服务是另一条：它和出口 IP 无关，"
+        "开着就是一条独立的地理线索。",
         ["到「清理」页勾选「身份标识字段」",
          "含密钥或令牌的配置不留副本；其他配置按清单备份",
          "邮箱不对的话，换 Gmail / iCloud / Outlook 重新注册",
          "不用的中文字体在字体册里停用",
-         "别在虚拟机里长期当主力机跑"],
+         "别在虚拟机里长期当主力机跑",
+         "「系统设置 → 隐私与安全性 → 定位服务」总开关关掉"],
         _probe_identity),
     _lv("2-2", "会话与遥测", "回声幽灵", "echo", "#8a7cc4",
         "对话历史、遥测事件、会话状态会把你的行为完整地留在本地。",

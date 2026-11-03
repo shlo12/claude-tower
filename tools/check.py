@@ -616,6 +616,15 @@ def check_shield_baseline() -> None:
     check("状态文件 0600", "0o600" in shield_py)
     check("读坏了不抛异常", "except (OSError, ValueError)" in shield_py)
 
+    # 测到的出口和基线对不上时，两端都不许直接改基线：先记成待确认，
+    # 等用户点「是我换的」。悄悄跟着新值走的话，真泄漏会被洗成正常。
+    store = (ROOT / "shield/Store.swift").read_text(encoding="utf-8")
+    shield_app = (ROOT / "shield/ShieldApp.swift").read_text(encoding="utf-8")
+    check("塔不静默覆盖待确认出口", 'data["egressSeen"] = egress' in wb)
+    check("哨兵不静默覆盖待确认出口", "cfg.egressSeen = mask" in store)
+    check("只有用户确认才换基线", 'case "confirm-egress"' in shield_app
+          and "cfg.egressIP = cfg.egressSeen" in store)
+
     # 出征闸门已经撤掉：塔不该再去启动 Claude
     check("塔不再启动 Claude", '"/api/launch"' not in app_py)
     check("塔不再有 gate 模块", not (ROOT / "core/gate.py").exists())
@@ -672,10 +681,30 @@ def check_new_findings() -> None:
         bad in pdns_py for bad in ("write_text(", "open(", "unlink(", "os.replace(")))
     check("代理 DNS 分三组名单",
           "_DEST_KEYS" in pdns_py and "_BOOT_KEYS" in pdns_py and "_NODE_KEYS" in pdns_py)
+    # nameserver-policy 只服务国内域名，必须和代理域名的名单分开算
+    check("国内域名策略单独解析",
+          "def parse_policy(" in pdns_py and '"domesticPolicy"' in pdns_py
+          and 'domesticPolicy' in dp and 'pd.get("domesticPolicy")' in tw)
     check("节点域名不参与判定", 'domesticNode' in pdns_py and 'rep["domesticNode"]' in dp)
     check("只认运行中的客户端", "ps\", \"-axo\", \"comm=\"" in pdns_py)
     check("helper/service 不算客户端", "_HELPER_HINTS" in pdns_py)
     check("国内解析器名单只一份", "CN_DNS = (" not in tw and "proxydns.CN_DNS_IPS" in tw)
+    # 两家解析器一起挂，内核并行查询、谁先回用谁，探针上的「DNS 出口」就会
+    # 在城市甚至国家之间跳。这不是泄漏，但必须能被指出来。
+    check("解析器按服务商归组",
+          "def provider(" in pdns_py and '"mixedProviders"' in pdns_py
+          and 'providers' in dp)
+    # 能查出来还得能改：FlClash 的 nameserver 在 plist 的 flutter.config 里，
+    # 必须走 defaults（cfprefsd 缓存），且必须先退出客户端（否则退出时刷回旧值）。
+    pfix_py = (ROOT / "core/proxyfix.py").read_text(encoding="utf-8")
+    dns_apply = pfix_py[pfix_py.index("def _apply_dns("):]
+    dns_apply = dns_apply[:dns_apply.index("\ndef ")]
+    check("DNS 统一可写入也可撤销",
+          "def _apply_dns(" in pfix_py and "def _undo_dns(" in pfix_py)
+    check("DNS 设置走 defaults 而非改 plist", '"/usr/bin/defaults"' in pfix_py)
+    check("写 DNS 前先退出客户端",
+          dns_apply.index("_quit()") < dns_apply.index("_write_settings(cfg)"))
+    check("DNS 写完回读校验", "回读不一致" in dns_apply)
     check("规则解析区分 prepend-rules",
           "prepend-rules" in dp and '"prepend"' in dp)
     check("置顶判定有行为探测", "def _dns_behavior(" in dp and "_behavior_label" in dp)
@@ -897,7 +926,7 @@ def check_uninstaller() -> None:
 
     from core import uninstall as U
 
-    check("清单顺序固定", U._ORDER[:3] == ["proxyfix", "privacy", "ipv6"])
+    check("清单顺序固定", U._ORDER[:3] == ["proxyfix", "proxydns", "privacy"])
     check("自己排最后", U._ORDER[-1] == "tower_app")
     check("先停进程再删文件",
           U._ORDER.index("stop") < U._ORDER.index("state")
@@ -935,6 +964,246 @@ def check_uninstaller() -> None:
     check("隔离覆盖状态目录与废纸篓",
           "U.STATE_DIR = base" in tst and "U.compat.send_to_trash = fake_trash" in tst)
     check("有「隔离仍然生效」的断言", "test_module_isolation_is_active" in tst)
+
+
+def check_proxy_guard() -> None:
+    """失败回落、客户端 v6、终端出口与解析器国家比对。
+
+    这四项都在回答「规则看起来对，实际请求从哪出去」：解析器国家与出口
+    国家不一致、终端没继承代理、节点全挂时退到 DIRECT。判据必须可单测，
+    且只在拿到证据时才下结论。
+    """
+    print("\n[回落 / 终端出口 / 国家比对]")
+    from core import deep, proxyguard
+
+    pg = (ROOT / "core" / "proxyguard.py").read_text(encoding="utf-8")
+    te = (ROOT / "core" / "terminalegress.py").read_text(encoding="utf-8")
+    dp = (ROOT / "core" / "deep.py").read_text(encoding="utf-8")
+    tw = (ROOT / "core" / "tower.py").read_text(encoding="utf-8")
+
+    check("回落策略模块只读", not any(
+        bad in pg for bad in ("write_text(", "open(", "unlink(", "os.replace(")))
+    check("回落判定可单测", "def inspect_text(" in pg and "def _walk(" in pg)
+    check("回落项有产出并被关卡消费",
+          '"net.proxy_fallback"' in dp and '"net.proxy_fallback"' in tw)
+    check("终端出口项有产出并被关卡消费",
+          '"net.terminal_egress"' in dp and '"net.terminal_egress"' in tw)
+    body = dp.split("def check_deep", 1)[-1].split("\ndef ", 1)[0]
+    check("一次扫描只读一遍客户端配置", body.count("proxyguard.inspect()") == 1)
+    check("终端探测命令是常量",
+          "def _argv(" in te and "TRACE_URL" in te and "MARKER" in te)
+    check("终端探测值不回传", "proxyEnv" in te and "proxy_env" in te)
+    check("终端不拿 v4 基线给 v6 定罪",
+          "same_family" in te and 'r.get("match") is None' in dp)
+    check("Shield 区分解析器与出口国家",
+          "p.dnsResolverCountry !== p.country" in
+          (ROOT / "shield" / "web" / "shield.js").read_text(encoding="utf-8"))
+
+    # 逐条跑判据：同一条规则，落到 DIRECT 与落到代理组必须是两个结论。
+    def guard(text: str) -> dict:
+        return proxyguard.inspect_text(text, "FlClash")
+
+    fallback = """
+proxy-groups:
+  - name: Fallback
+    type: fallback
+    proxies:
+      - HK
+      - DIRECT
+rules:
+  - MATCH,Fallback
+"""
+    check("自动回落组含 DIRECT 报中危",
+          deep.check_proxy_fallback(guard(fallback))["severity"] == "medium")
+    check("最终规则落到 DIRECT 报高危",
+          deep.check_proxy_fallback(guard(fallback.replace(
+              "MATCH,Fallback", "MATCH,DIRECT")))["severity"] == "high")
+    check("select 默认成员 DIRECT 报高危",
+          deep.check_proxy_fallback(guard("""
+proxy-groups:
+  - name: Pick
+    type: select
+    proxies:
+      - DIRECT
+      - HK
+rules:
+  - MATCH,Pick
+"""))["severity"] == "high")
+    check("自动组没有 DIRECT 判通过",
+          deep.check_proxy_fallback(guard("""
+proxy-groups:
+  - name: Pick
+    type: url-test
+    proxies:
+      - HK
+      - JP
+rules:
+  - MATCH,Pick
+"""))["severity"] == "pass")
+    check("读不到配置不下结论",
+          deep.check_proxy_fallback({"checked": False, "note": "x"})["severity"] == "info")
+    # 出口漂移和回落是两件事：回落全绿、规则全命中，出口照样可能被自动组换掉。
+    drift = """
+proxy-groups:
+  - name: Auto
+    type: url-test
+    proxies:
+      - HK
+      - US
+rules:
+  - DOMAIN-SUFFIX,claude.ai,Auto
+  - MATCH,Auto
+"""
+    check("Claude 落到自动测速组报中危",
+          deep.check_proxy_drift(guard(drift))["severity"] == "medium")
+    check("Claude 落到 select 组不会被自动换节点",
+          deep.check_proxy_drift(guard(drift.replace(
+              "type: url-test", "type: select")))["severity"] == "pass")
+    check("自动换节点项有产出", '"net.proxy_drift"' in dp)
+    check("出口未确认不发终端请求",
+          deep.check_terminal_egress({"available": False})["severity"] == "info")
+
+    from core import proxydns  # noqa: F401  仅确认模块可导入
+    rep = {
+        "system": ["1.1.1.1"], "systemDomestic": [],
+        "clients": [{"name": "X", "mode": "fake-ip", "config": "",
+                     "destination": ["1.1.1.1"], "bootstrap": [], "node": [],
+                     "policy": []}],
+        "domesticDestination": [], "domesticNode": [], "domesticPolicy": [],
+        "note": "",
+    }
+    resolver = {"checked": True, "masked": "1.1.1.1", "country": "US",
+                "org": "Cloudflare, Inc."}
+    diff = deep.check_proxy_dns(state={"tunneled": True}, report=rep,
+                                resolver=resolver,
+                                egress={"available": True, "country": "JP"})
+    same = deep.check_proxy_dns(state={"tunneled": True}, report=rep,
+                                resolver=resolver,
+                                egress={"available": True, "country": "US"})
+    check("解析器与出口不同国记低危",
+          diff["severity"] == "low" and diff["dns"]["countryMismatch"])
+    check("解析器与出口同国不新增结论", same["severity"] == "pass")
+    noeg = deep.check_proxy_dns(state={"tunneled": True}, report=rep,
+                                resolver=resolver, egress={})
+    check("没有出口国家不做比对", noeg["dns"]["countryMismatch"] is False)
+
+    # 境外 DoH 不挂 `#PROXY` 时查询从本机 IP 发出，探针看不到这一层。
+    relay = dict(rep, unrelayed=["https://1.1.1.1/dns-query"])
+    bare = deep.check_proxy_dns(state={"tunneled": True}, report=relay,
+                                resolver=resolver, egress={})
+    check("境外 DoH 没挂代理后缀记低危",
+          bare["severity"] == "low" and "没走代理" in bare["title"])
+    check("挂了后缀就不再报",
+          deep.check_proxy_dns(state={"tunneled": True}, report=dict(rep, unrelayed=[]),
+                               resolver=resolver, egress={})["severity"] == "pass")
+
+
+def check_third_party_gaps() -> None:
+    """浏览器指纹、定位服务、终端代理变量。
+
+    这三项都是「外部探针会看，而我们原来测不到」的东西。共同要求：
+    判据可单测、读不到就不下结论、要写的地方只写自己那一块。
+    """
+    print("\n[浏览器指纹 / 定位服务 / 终端代理]")
+    from core import browserwebrtc, location, scanner, shellproxy
+
+    bw_src = (ROOT / "core" / "browserwebrtc.py").read_text(encoding="utf-8")
+    lo_src = (ROOT / "core" / "location.py").read_text(encoding="utf-8")
+    sp_src = (ROOT / "core" / "shellproxy.py").read_text(encoding="utf-8")
+    sc_src = (ROOT / "core" / "scanner.py").read_text(encoding="utf-8")
+    tw_src = (ROOT / "core" / "tower.py").read_text(encoding="utf-8")
+    js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    app_src = (ROOT / "app.py").read_text(encoding="utf-8")
+
+    # 浏览器指纹：值必须来自浏览器自己，不能拿系统设置替它回答
+    check("浏览器指纹只判纯函数", "def assess_fingerprint(" in bw_src)
+    check("页面回传语言列表", "navigator.languages" in js)
+    check("页面回传时区与区域格式",
+          "intlOptions().timeZone" in js and "intlOptions().locale" in js)
+    check("扫描项消费浏览器指纹", '"locale.browser"' in sc_src)
+    check("关卡消费浏览器指纹", '"locale.browser"' in tw_src)
+    zh = browserwebrtc.assess_fingerprint(
+        {"languages": ["zh-CN"], "locale": "zh-CN", "timeZone": "Asia/Shanghai"},
+        egress_country="US", system_langs=["en-US"], system_tz="Asia/Shanghai")
+    check("中文首选语言判为 zh-first", zh["state"] == "zh-first")
+    ok = browserwebrtc.assess_fingerprint(
+        {"languages": ["en-US"], "locale": "en-US", "timeZone": "Asia/Shanghai"},
+        egress_country="US", system_langs=["en-US"], system_tz="Asia/Shanghai")
+    check("一致时判为 ok", ok["state"] == "ok")
+    empty = browserwebrtc.assess_fingerprint({}, egress_country="US")
+    check("没实测过就说没实测", empty["state"] == "no-data")
+
+    # UA：国产浏览器 / 国产设备。语言和时区都能改，UA 只能换浏览器。
+    from core import uatraits
+    ua_src = (ROOT / "core" / "uatraits.py").read_text(encoding="utf-8")
+    check("UA 模块只读", not any(
+        bad in ua_src for bad in ("write_text(", "open(", "unlink(", "os.replace(")))
+    check("UA 命中微信",
+          uatraits.classify_browser(
+              "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 MicroMessenger/8.0.47")
+          == "微信 / 企业微信")
+    check("普通 Chrome 不误伤",
+          uatraits.classify_browser(
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "Chrome/131.0 Safari/537.36") == "")
+    check("正则不用 /mi/ 这种过宽写法",
+          uatraits.classify_browser(
+              "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/131 Safari/537.36 "
+              "Vivaldi/6.5") == "")
+    check("鸿蒙权重最高",
+          uatraits.classify_device("Mozilla/5.0 (Linux; Android 12; HarmonyOS)")[1] == 1.0)
+    check("扫描项消费 UA", '"fp.cn_browser"' in sc_src)
+    check("关卡消费 UA", '"fp.cn_browser"' in tw_src)
+    check("页面回传 UA", "ua: navigator.userAgent" in js)
+
+    # 时区分三档：直接触发 / 受限地区 / 支持地区。混成一档会让人去改真资料。
+    from core import rules as rules_mod
+    check("中国台湾单列一档",
+          "Asia/Taipei" not in rules_mod.GREATER_CHINA_TZ
+          and "Asia/Taipei" in rules_mod.SUPPORTED_TZ)
+
+    # 定位服务：只读、要授权、缓存会过期
+    check("定位服务不写系统设置",
+          "defaults write" not in lo_src and '"write"' not in lo_src)
+    check("定位服务走管理员授权", "with administrator privileges" in lo_src)
+    check("定位缓存是 0600", "os.fchmod(fd, 0o600)" in lo_src)
+    check("定位缓存会过期", "STALE = " in lo_src and "stale" in lo_src)
+    check("扫描项消费定位服务", '"dev.location"' in sc_src)
+    check("关卡消费定位服务", '"dev.location"' in tw_src)
+    check("定位项挂探测按钮", 'probe="location"' in sc_src)
+    check("页面按类型分发探测", "probeBtn.dataset.probe === 'location'" in js)
+    check("开=1/关=0 解析正确",
+          location._parse("1") is True and location._parse("0") is False)
+    check("读不出来不当成关着", location._parse("UNKNOWN") is None)
+
+    # 终端代理变量：只写一个块，撤销一字不差
+    check("代理块有起止标记",
+          "BLOCK0 = " in sp_src and "BLOCK1 = " in sp_src)
+    check("写之前备份原文件", "def _backup(" in sp_src)
+    check("有别人的代理变量就不写", "foreign_env" in sp_src)
+    sample = "# 原有\nexport PATH=x\n"
+    check("块能原样摘掉",
+          shellproxy.strip_block(sample + shellproxy._block(7890)) == sample)
+    check("端口越界被拒", all(
+        _raises(ValueError, shellproxy._port, bad) for bad in (0, 70000, "abc")))
+    check("扫描项指向写入入口", "终端代理变量" in
+          (ROOT / "core" / "deep.py").read_text(encoding="utf-8"))
+    check("卡片有端口输入与两个按钮",
+          all(k in html for k in ('id="shellproxy-port"', 'id="shellproxy-apply"',
+                                  'id="shellproxy-undo"')))
+    check("卡片在切换标签时刷新", "refreshShellproxy()" in js)
+    check("接口发令牌", '"/api/shellproxy"' in app_src and '"/api/location"' in app_src)
+
+
+def _raises(exc, fn, *args) -> bool:
+    try:
+        fn(*args)
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def check_kernelcheck() -> None:
@@ -979,6 +1248,8 @@ def main() -> int:
     check_shield_baseline()
     check_new_findings()
     check_transport_logic()
+    check_proxy_guard()
+    check_third_party_gaps()
     check_browser_side()
     check_kernelcheck()
     check_uninstaller()

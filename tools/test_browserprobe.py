@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -134,6 +135,18 @@ class AssessTests(unittest.TestCase):
         # 基线过期时不一致是正常的，报成泄漏只会教用户忽略告警
         v = bw.assess(self._s(srflx=[OTHER]), MASK, bw.STALE_AFTER + 1)
         self.assertEqual(v["state"], "stale")
+
+    def test_mismatch_pending_is_not_leak_and_not_stale_claim(self):
+        # 出口刚换、还没确认：同样不能定罪，但别借「过了一天」那句话——
+        # 基线可能是十分钟前的，说错了用户会去查错方向。
+        v = bw.assess(self._s(srflx=[OTHER]), MASK, 60, pending=True)
+        self.assertEqual(v["state"], "stale")
+        self.assertIn("还没确认", v["title"])
+        self.assertNotIn("一天", v["detail"])
+
+    def test_pending_does_not_turn_a_match_into_a_warning(self):
+        v = bw.assess(self._s(srflx=[PUB]), MASK, 60, pending=True)
+        self.assertEqual(v["state"], "pass")
 
     def test_no_baseline_is_unknown_not_pass(self):
         v = bw.assess(self._s(srflx=[PUB]), "", None)
@@ -471,6 +484,95 @@ class WiringTests(unittest.TestCase):
         # 探针不该碰摄像头：碰了就要授权，一次点击变成两次
         js = (ROOT / "web/app.js").read_text(encoding="utf-8")
         self.assertNotIn("getUserMedia(", js)
+
+
+class FingerprintTests(unittest.TestCase):
+    """浏览器自己报的语言 / 区域格式 / 时区。
+
+    这一项存在的理由：系统语言改成英文，Chrome 的语言列表可以还是中文。
+    所以判据只看浏览器报上来的值，不拿系统设置替它回答。
+    """
+
+    def judge(self, browser, country="US", sys_langs=None, sys_tz="America/Los_Angeles"):
+        return bw.assess_fingerprint(browser, egress_country=country,
+                                     system_langs=sys_langs or ["en-US"],
+                                     system_tz=sys_tz)
+
+    def test_no_data(self):
+        out = self.judge({})
+        self.assertEqual(out["state"], "no-data")
+        self.assertIn("浏览器", out["advice"])
+
+    def test_chinese_first_language_is_reported(self):
+        out = self.judge({"languages": ["zh-CN", "en"], "locale": "zh-CN",
+                          "timeZone": "Asia/Shanghai"})
+        self.assertEqual(out["state"], "zh-first")
+        self.assertEqual(out["first"], "zh-CN")
+        self.assertTrue(out["systemDiffers"])
+        self.assertIn("Accept-Language", out["detail"])
+
+    def test_chinese_is_not_flagged_when_it_matches_system(self):
+        # 系统也是中文时，这条只是同一件事的复述，由扫描侧决定要不要扣分
+        out = self.judge({"languages": ["zh-Hans-CN"]}, sys_langs=["zh-Hans-CN"])
+        self.assertEqual(out["state"], "zh-first")
+        self.assertFalse(out["systemDiffers"])
+
+    def test_region_mismatch(self):
+        out = self.judge({"languages": ["en-US"], "locale": "zh-CN",
+                          "timeZone": "Asia/Shanghai"}, sys_tz="Asia/Shanghai")
+        self.assertEqual(out["state"], "region-mismatch")
+        self.assertEqual(out["region"], "CN")
+
+    def test_region_without_country_is_skipped(self):
+        # `en` 只有语言没有地区，不能拿去跟出口国家比
+        out = self.judge({"languages": ["en-US"], "locale": "en",
+                          "timeZone": "America/Los_Angeles"})
+        self.assertEqual(out["state"], "ok")
+        self.assertEqual(out["region"], "")
+
+    def test_timezone_differs_from_system(self):
+        out = self.judge({"languages": ["en-US"], "locale": "en-US",
+                          "timeZone": "Asia/Shanghai"}, sys_tz="America/Los_Angeles")
+        self.assertEqual(out["state"], "tz-differs")
+
+    def test_all_green(self):
+        out = self.judge({"languages": ["en-US"], "locale": "en-US",
+                          "timeZone": "America/Los_Angeles"})
+        self.assertEqual(out["state"], "ok")
+
+    def test_languages_are_cleaned(self):
+        out = self.judge({"languages": ["zh-CN", "zh-CN", 5, "", "en-US", None]})
+        self.assertEqual(out["languages"], ["zh-CN", "en-US"])
+
+    def test_languages_are_capped(self):
+        out = self.judge({"languages": [f"l{i}" for i in range(50)]})
+        self.assertEqual(len(out["languages"]), bw.MAX_LANGS)
+
+    def test_string_instead_of_list(self):
+        # 有些页面只报 navigator.language，是字符串不是数组
+        self.assertEqual(self.judge({"languages": "zh-CN"})["first"], "zh-CN")
+
+    def test_garbage_input_does_not_raise(self):
+        for bad in (None, [], "x", 0, {"languages": {}}):
+            out = bw.assess_fingerprint(bad, egress_country="US")
+            self.assertIn(out["state"], ("no-data", "ok"))
+
+    def test_save_keeps_the_browser_block(self):
+        tmp = Path(tempfile.mkdtemp())
+        target = tmp / "webrtc.json"
+        with patch.object(bw, "STATE_DIR", tmp), patch.object(bw, "STATE_FILE", target):
+            bw.save({"candidates": [], "languages": ["zh-CN", "en"],
+                     "timeZone": "Asia/Shanghai", "intlLocale": "zh-CN"})
+        record = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(record["browser"]["languages"], ["zh-CN", "en"])
+        self.assertEqual(record["browser"]["timeZone"], "Asia/Shanghai")
+        self.assertEqual(record["browser"]["locale"], "zh-CN")
+
+    def test_page_sends_the_three_fields(self):
+        js = (ROOT / "web/app.js").read_text(encoding="utf-8")
+        self.assertIn("navigator.languages", js)
+        self.assertIn("intlOptions().timeZone", js)
+        self.assertIn("intlOptions().locale", js)
 
 
 if __name__ == "__main__":

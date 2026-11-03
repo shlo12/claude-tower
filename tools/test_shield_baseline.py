@@ -129,6 +129,34 @@ class BaselineTests(unittest.TestCase):
         self.assertIsNotNone(st["baseline"]["ipAge"])
         self.assertGreaterEqual(st["baseline"]["ipAge"], 0)
 
+    def test_egress_change_is_pending_not_silent(self):
+        """换节点不能让基线跟着跑：基线是「UDP 出口该长什么样」的参照，
+        悄悄跟着新值走的话，真泄漏会被当成正常。"""
+        shield.write_baseline(scan(country="JP", ip="5.34.*.136"))
+        self.assertTrue(shield.write_baseline(scan(country="US", ip="9.9.*.10")))
+        data = json.loads(self.file.read_text(encoding="utf-8"))
+        self.assertEqual(data["egressIP"], "5.34.*.136")
+        self.assertEqual(data["country"], "JP")
+        self.assertEqual(data["egressSeen"], "9.9.*.10")
+        self.assertEqual(data["egressSeenCountry"], "US")
+        self.assertGreater(data["egressSeenAt"], 0)
+
+    def test_returning_to_baseline_clears_pending(self):
+        shield.write_baseline(scan(ip="5.34.*.136"))
+        shield.write_baseline(scan(ip="9.9.*.10"))
+        self.assertTrue(shield.write_baseline(scan(ip="5.34.*.136")))
+        data = json.loads(self.file.read_text(encoding="utf-8"))
+        self.assertEqual(data["egressSeen"], "")
+        self.assertEqual(data["egressSeenCountry"], "")
+        self.assertEqual(data["egressIP"], "5.34.*.136")
+
+    def test_repeated_candidate_does_not_rewrite(self):
+        shield.write_baseline(scan(ip="5.34.*.136"))
+        shield.write_baseline(scan(ip="9.9.*.10"))
+        before = self.file.stat().st_mtime_ns
+        self.assertFalse(shield.write_baseline(scan(ip="9.9.*.10")))
+        self.assertEqual(self.file.stat().st_mtime_ns, before)
+
     def test_status_survives_missing_file(self):
         # 不能读真实进程表：开发机上可能正好开着仓库里的 Shield，
         # 这条测试就会变成「取决于今天开没开应用」。

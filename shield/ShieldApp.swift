@@ -66,8 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var scheduledSecs: TimeInterval = 0
     /// 上一轮是不是处于「TUN 在位但 DNS 没接管」。只为了不重复通知。
     var lastDnsSuspect = false
+    /// 上一轮解析出口是否落在国内解析器。同上，只为了不重复通知。
+    var lastDnsResolve = false
     /// 同上，UDP 出口不一致。
     var lastStunLeak = false
+    /// 同上，真实地址已经被交给网页（国内节点回了非基线地址）。
+    var lastStunExposed = false
+    /// 已经喊过的「出口变了」候选。同一个地址只喊一次，用户确认或改回来就复位。
+    var lastEgressSeen = ""
     /// 这轮启动后是否已经为「没有塔的基线」喊过一次。只喊一次，
     /// 否则每 30 秒一条通知，用户第一件事就是关掉通知权限。
     var notifiedNoTower = false
@@ -341,6 +347,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         cfg.country = disk.country
         cfg.egressIP = disk.egressIP
         cfg.egressAt = disk.egressAt
+        cfg.egressSeen = disk.egressSeen
+        cfg.egressSeenAt = disk.egressSeenAt
+        cfg.egressSeenCountry = disk.egressSeenCountry
         cfg.ruleGuard = disk.ruleGuard
         probing = true
         let baseline = cfg.baselineTz
@@ -350,11 +359,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let since = takeoverSince
         // 超过一天的出口不敢拿来比对：换节点、重拨、代理池轮换都会让旧地址失效，
         // 拿它去判「UDP 出口不一致」，除了制造误报没有别的用处。
+        // 出口变了但还没确认时也不比对：这一刻我们明确知道基线不是现在这条路。
+        let pending = !cfg.egressSeen.isEmpty
         let fresh = cfg.egressAt > 0
             && Date().timeIntervalSince1970 - cfg.egressAt < 86400
+            && !pending
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let snap = Probe.run(baselineTz: baseline, egressMask: mask,
-                                 maskFresh: fresh, ruleGuard: guardSpec,
+                                 maskFresh: fresh, egressPending: pending,
+                                 ruleGuard: guardSpec,
                                  forceStun: forceStun, forceFresh: forceFresh,
                                  forceTransport: forceTransport,
                                  takeoverSince: since)
@@ -371,6 +384,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func apply(_ snap: Snapshot) {
         let before = last?.verdict
         last = snap
+        // 先落基线：下面的提醒和面板都要读更新后的 cfg。
+        refreshEgressBaseline(snap)
+        reportEgressChange(snap)
         // 记账：这一轮「客户端在跑但没接管」是不是还在持续，从什么时候开始的。
         // Probe 下一轮拿它算持续时长。客户端一接管或 Claude 退出就清零。
         if snap.takeoverMissing {
@@ -385,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let kind: String
             if snap.connections.direct > 0 { kind = "connection" }
             else if snap.dnsSuspect { kind = "dns" }
+            else if !snap.stunExposed.isEmpty { kind = "stun-exposed" }
             else if snap.stunLeak { kind = "stun" }
             else if snap.takeoverEscalated { kind = "takeover" }
             else { kind = snap.verdict.rawValue }
@@ -432,17 +449,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             Store.log("recovered")
         }
 
-        // 只装了哨兵、没装塔：基线永远接不上，时区和 UDP 都没法比对。
+        // 缺基线：时区只有塔能建，出口哨兵会自己测。
         // 面板里有常驻横幅，但用户可能根本不点开菜单栏——Claude 在跑时喊一次。
-        if snap.hasTowerData {
+        // 用更新后的 cfg 判断：这一轮刚测出出口基线时，不该还喊「没有基线」。
+        if !cfg.baselineTz.isEmpty || !cfg.egressIP.isEmpty {
             notifiedNoTower = false
         } else if snap.claudeRunning, cfg.enabled, !paused, !notifiedNoTower {
-            notify(title: "哨兵没有塔的基线",
-                   body: "时区漂移和 UDP 出口现在比对不了。打开 Claude Tower 扫一次就会接上。")
+            notify(title: "哨兵还没有基线",
+                   body: "时区基线要打开 Claude Tower 扫一次；出口基线哨兵会自己测。")
             Store.appendHit(&cfg, kind: "notower",
-                            note: "没有塔的基线，时区与 UDP 出口无法比对")
+                            note: "还没有基线，时区与 UDP 出口无法比对")
             Store.save(cfg)
-            Store.log("no tower baseline")
+            Store.log("no baseline")
             notifiedNoTower = true
         }
 
@@ -460,6 +478,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
             lastDnsSuspect = snap.dnsSuspect
 
+            // 接管没问题、解析却落回国内解析器：这是「名单配错了」，
+            // 和「没接管」是两种修法，各报一次。
+            if snap.dnsEgressSuspect, !lastDnsResolve {
+                let who = snap.dnsResolverOrg.isEmpty ? "国内解析器" : snap.dnsResolverOrg
+                notify(title: "DNS 解析出口在国内",
+                       body: "TUN 接管了查询，但真正做递归的是 \(who)（\(Probe.maskResolver(snap.dnsResolverIP))）。"
+                           + "把客户端的 nameserver 换成境外 DoH。")
+                Store.log("dns resolver cn org=\(snap.dnsResolverOrg) country=\(snap.dnsResolverCountry) ip=\(Probe.maskResolver(snap.dnsResolverIP))")
+            }
+            lastDnsResolve = snap.dnsEgressSuspect
+
             // STUN 泄漏比 DNS 更值得打断：DNS 没接管只是解析绕出去，
             // UDP 出口不一致意味着真实地址已经暴露给对端了。
             if snap.stunLeak, !lastStunLeak {
@@ -468,14 +497,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 Store.log("stun leak ips=\(snap.stunForeign.map(Probe.maskIP).joined(separator: ",")) mask=\(snap.egressMask)")
             }
             lastStunLeak = snap.stunLeak
+
+            // 这一条和上面那条可以同时成立：境外节点之间并不分裂，但国内节点
+            // 已经把真实地址交出去了。ICE 候选不认「这条是给国内用的」。
+            if !snap.stunExposed.isEmpty, !lastStunExposed {
+                let who = snap.stunExposed.map(Probe.maskIP).joined(separator: "、")
+                notify(title: "WebRTC 在把真实地址交给网页",
+                       body: "国内 STUN 节点回了 \(who)，和当前出口不是同一个。"
+                           + "浏览器会把它作为 ICE 候选交给任何页面。")
+                Store.log("stun exposed ips=\(who) mask=\(snap.egressMask)")
+            }
+            lastStunExposed = !snap.stunExposed.isEmpty
         } else {
             lastDnsSuspect = false
+            lastDnsResolve = false
             lastStunLeak = false
+            lastStunExposed = false
         }
         // 周期可能刚变过（L2 武装、Claude 起来/退出、暂停）。这里重算一次，
         // 变了才重建计时器，没变就什么都不做。
         scheduleTimer()
         push()
+    }
+
+    /// 把这一轮从 Claude 边缘测到的 HTTP 出口写进基线。
+    ///
+    /// 这是「不开塔也能每天续期」的那条路：trace 走系统代理 / TUN，
+    /// 和 UDP 的 STUN 是两条独立路径，比对仍然有意义。遇到不同的地址
+    /// 不直接改基线，只记待确认——见 Store.applyEgress 的注释。
+    func refreshEgressBaseline(_ snap: Snapshot) {
+        guard !snap.egressCandidateIP.isEmpty else { return }
+        let mask = Probe.maskIP(snap.egressCandidateIP)
+        let at = snap.domainAt > 0 ? snap.domainAt : snap.at.timeIntervalSince1970
+        let update = Store.recordEgress(&cfg, mask: mask,
+                                        country: snap.egressCandidateCountry, at: at)
+        switch update {
+        case .adopted:
+            Store.log("egress baseline adopted mask=\(mask) country=\(snap.egressCandidateCountry)")
+            lastEgressSeen = ""
+        case .refreshed:
+            Store.log("egress baseline renewed mask=\(mask)")
+            lastEgressSeen = ""
+        case .cleared:
+            Store.log("egress pending cleared mask=\(mask)")
+            lastEgressSeen = ""
+        case .pending:
+            break
+        case .skipped:
+            break
+        }
+    }
+
+    /// 出口对不上时喊一次。同一个候选地址只喊一次；用户确认或改回来就复位，
+    /// 否则每 30 秒一条通知，用户第一件事就是关掉通知权限。
+    func reportEgressChange(_ snap: Snapshot) {
+        guard !cfg.egressSeen.isEmpty else {
+            lastEgressSeen = ""
+            return
+        }
+        guard cfg.egressSeen != lastEgressSeen else { return }
+        lastEgressSeen = cfg.egressSeen
+        let base = [cfg.country, cfg.egressIP].filter { !$0.isEmpty }.joined(separator: " · ")
+        let seen = [cfg.egressSeenCountry, cfg.egressSeen].filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        Store.appendHit(&cfg, kind: "egress",
+                        note: "出口从 \(base) 变成 \(seen)，等确认", force: true)
+        Store.save(cfg)
+        Store.log("egress pending base=\(cfg.egressIP) seen=\(cfg.egressSeen)")
+        if snap.claudeRunning, cfg.enabled, !paused {
+            notify(title: "出口变了，等你确认",
+                   body: "基线是 \(base)，现在测到 \(seen)。是你自己换的节点，就在哨兵面板里确认；"
+                       + "不是的话先查代理。")
+        }
     }
 
     // MARK: - 启动闸门
@@ -502,11 +595,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let baseline = cfg.baselineTz
         let mask = cfg.egressIP
         let guardSpec = cfg.ruleGuard
+        let pending = !cfg.egressSeen.isEmpty
         let fresh = cfg.egressAt > 0
             && Date().timeIntervalSince1970 - cfg.egressAt < 86400
+            && !pending
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let snap = Probe.run(baselineTz: baseline, egressMask: mask,
-                                 maskFresh: fresh, ruleGuard: guardSpec, forceFresh: true)
+                                 maskFresh: fresh, egressPending: pending,
+                                 ruleGuard: guardSpec, forceFresh: true)
             DispatchQueue.main.async { self?.gateDecide(snap) }
         }
     }
@@ -610,10 +706,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             "dnsFake": snap.dnsFake,
             "dnsChecked": snap.dnsChecked,
             "dnsSuspect": snap.dnsSuspect,
+            "dnsResolver": Probe.maskResolver(snap.dnsResolverIP),
+            "dnsResolverOrg": snap.dnsResolverOrg,
+            "dnsResolverCountry": snap.dnsResolverCountry,
+            "dnsResolverChecked": snap.dnsResolverChecked,
+            "dnsEgressSuspect": snap.dnsEgressSuspect,
             "stun": snap.stunAll.map(Probe.maskIP),
             "stunForeign": snap.stunForeign.map(Probe.maskIP),
             "stunChecked": snap.stunChecked,
             "stunLeak": snap.stunLeak,
+            // 国内节点回的地址里，不属于当前出口的那些。判「真实地址有没有被
+            // 交给网页」用的是这一组，不是 stunLeak。
+            "stunExposed": snap.stunExposed.map(Probe.maskIP),
             // 到 Anthropic 的 HTTPS 有没有走通。这只是那一刻的证据，
             // 不参与主判定——面板要能在没测、只通一条、证书异常时分开显示。
             "connectionsState": snap.connections.state,
@@ -626,6 +730,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             "transportLabel": snap.transportLabel,
             "transportDetail": snap.transportDetail,
             "transportAt": snap.transportAt,
+            // Claude 自己的边缘节点看到的出口。只上屏，不参与 verdict。
+            "domainChecked": snap.domainChecked,
+            "domainState": snap.domainState,
+            "domainLabel": snap.domainLabel,
+            "domainDetail": snap.domainDetail,
+            "domainAt": snap.domainAt,
             "egressMask": snap.egressMask,
             "maskFresh": snap.maskFresh,
             // 塔的基线在不在、新不新。缺了就没法判时区漂移和 UDP 出口，
@@ -634,10 +744,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             "towerState": snap.towerState,
             "environmentReady": snap.environmentReady,
             "idleState": snap.idleState.rawValue,
-            // 塔写基线的时间和国家。面板要显示「多久以前记的」「记的是哪国出口」，
+            // 基线的时间和国家。面板要显示「多久以前测的」「测的是哪国出口」，
             // 缺了这两个字段就只能说「有基线」，说不清它还值不值得信。
             "egressAt": cfg.egressAt,
             "country": cfg.country,
+            // 出口变了但还没确认。面板要据此挂横幅、接上确认按钮，
+            // 不能让新出口悄悄变成基线。
+            "egressSeen": cfg.egressSeen,
+            "egressSeenAt": cfg.egressSeenAt,
+            "egressSeenCountry": cfg.egressSeenCountry,
             "tz": snap.tz,
             "baselineTz": snap.baselineTz,
             "tzDrift": snap.tzDrift,
@@ -721,6 +836,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             Store.save(cfg)
             Store.log("fixtz: \(note)")
             probeNow(forceStun: true, forceFresh: true)
+        case "confirm-egress":
+            // 只有用户自己点过这一下，新出口才会替换基线。这一步不要二次确认：
+            // 他就是来确认的，再问一遍等于把「是我换的」问成「确定吗」。
+            if Store.confirmEgress(&cfg, at: Date().timeIntervalSince1970) {
+                Store.appendHit(&cfg, kind: "egress",
+                                note: "确认出口变更为 \(cfg.egressIP)", force: true)
+                Store.save(cfg)
+                Store.log("egress confirmed mask=\(cfg.egressIP) country=\(cfg.country)")
+                lastEgressSeen = ""
+                probeNow(forceStun: true, forceFresh: true)
+            }
+            push()
         case "login":
             // 想开但已经失效时，点击是「修」而不是「关」：否则用户看到
             // 一条「自启失效」的横幅，点一下反而把残留的启动项删掉。

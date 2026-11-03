@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 塔在分流修复后留下的「这批规则应该长什么样」。
@@ -37,14 +38,30 @@ struct Snapshot {
     var dnsIP = ""
     var dnsFake = false
     var dnsChecked = false
+    /// 真正做递归的解析器出口。`dnsFake` 只证明查询被接管，证明不了后续
+    /// 由谁解析——这一组才是那个答案。完整地址只在内存里用。
+    var dnsResolverIP = ""
+    var dnsResolverOrg = ""
+    var dnsResolverCountry = ""
+    var dnsResolverChecked = false
     /// STUN 打回来的公网地址。`stunAll` 含国内节点，`stunForeign` 只有境外的。
     var stunAll: [String] = []
     var stunForeign: [String] = []
+    /// 国内节点看到的地址。分流上它们是「正确答案」，但 ICE 候选是交给
+    /// 任何网页的，所以这一组用来判「真实地址有没有被交出去」。
+    var stunDomestic: [String] = []
     var stunChecked = false
-    /// 塔记下的打码出口地址（`1.2.*.4`）。空表示塔没跑过或没拿到。
+    /// 基线里的打码出口地址（`1.2.*.4`）。空表示两边都还没测到。
     var egressMask = ""
-    /// 塔记的那个出口还新鲜吗。过期的不能拿来下结论。
+    /// 这个基线还新鲜吗。过期的、或正在等用户确认新出口时，都不能拿它下结论。
     var maskFresh = false
+    /// 哨兵自己测到的出口（Claude 边缘的 `/cdn-cgi/trace`）。只在内存里用，
+    /// 打码后才写盘。两个域名给出不同地址时留空——那说明分流把两条路分开了，
+    /// 拿任何一条当基线都是在骗自己。
+    var egressCandidateIP = ""
+    var egressCandidateCountry = ""
+    /// 基线和当前测到的出口对不上，等用户确认。
+    var egressPending = false
     /// 塔关过 IPv6 之后留下的记录，现在还算不算数。
     var ipv6Checked = false
     var ipv6Drift = false
@@ -60,28 +77,40 @@ struct Snapshot {
     var transportLabel = ""
     var transportDetail = ""
     var transportAt = 0.0
+    /// Claude 自己的边缘节点看到的出口（claude.ai / claude.com 的 /cdn-cgi/trace）。
+    /// 只上屏、不参与 verdict：按域名分流的规则可能让两个请求走不同的路，
+    /// 这值得提醒，但不足以说明「现在就该终止 Claude」。
+    var domainChecked = false
+    var domainState = "off"      // ok / warn / off
+    var domainLabel = ""
+    var domainDetail = ""
+    var domainAt = 0.0
 
-    /// 塔有没有留下基线。只看这两个键：时区漂移要用 baselineTz，
-    /// UDP 比对要用 egressMask。两个都空，说明塔没扫过或没写成功。
+    /// 有没有基线。时区漂移要用 baselineTz，UDP 比对要用 egressMask。
+    /// 两个都空，说明塔没扫过、哨兵也还没测到出口。
     var hasTowerData: Bool { !baselineTz.isEmpty || !egressMask.isEmpty }
 
-    /// 基线完整且没过期。缺时区、缺出口、超过 24 小时，都不算。
+    /// 基线完整且没过期。缺时区、缺出口、超过 24 小时、或出口待确认，都不算。
     var towerFresh: Bool { !baselineTz.isEmpty && !egressMask.isEmpty && maskFresh }
 
-    /// 「缺塔 / 基线过期 / 可用」三态，面板拿它决定横幅说什么。
+    /// 「缺基线 / 过期 / 可用」三态，面板拿它决定横幅说什么。
     var towerState: String {
         if !hasTowerData { return "missing" }
         return towerFresh ? "ok" : "stale"
     }
 
     /// Claude 没运行时，主状态只回答一件事：现在能不能启动。
-    /// 出口和 DNS 不依赖塔，先判；时区与 UDP 必须有基线才判得了。
+    /// 出口和 DNS 不依赖基线，先判；时区与 UDP 必须有基线才判得了。
     var idleState: IdleState {
         if connections.direct > 0 { return .blocked }
         if !exitReady { return .blocked }
         if dnsSuspect { return .blocked }
-        if !hasTowerData { return .notower }
+        if dnsEgressSuspect { return .blocked }
+        // 时区基线只有塔能建：没有它就没有「应该是什么时区」的参照。
+        // 出口基线哨兵自己能测，不该因为缺塔把这一项一起算成「判不了」。
+        if baselineTz.isEmpty { return .notower }
         if !towerFresh { return .stale }
+        if !stunExposed.isEmpty { return .blocked }
         if stunLeak { return .blocked }
         if tzDrift { return .blocked }
         return .ready
@@ -90,7 +119,8 @@ struct Snapshot {
     /// 环境是否已经可以承载 Claude。和 idleState 分开写：Claude 在跑时
     /// 也要能回答这个问题（面板横幅、日志都用得上）。
     var environmentReady: Bool {
-        towerFresh && exitReady && connections.direct == 0 && !dnsSuspect && !stunLeak && !tzDrift
+        towerFresh && exitReady && connections.direct == 0 && !dnsSuspect
+            && !dnsEgressSuspect && stunExposed.isEmpty && !stunLeak && !tzDrift
     }
 
     /// Tower 写入的基线时区与当前不一致，说明配置被改过（软件更新最常见）。
@@ -107,6 +137,15 @@ struct Snapshot {
     /// 实测过：本机没开 TUN、系统 DNS 还是 8.8.8.8，dig 照样回 198.18.2.160。
     /// 所以「DNS 服务器是公共 DNS」根本不能当判据，只有解析结果本身算数。
     var dnsSuspect: Bool { tunUp && dnsChecked && !dnsFake }
+
+    /// 接管生效了，但真正解析域名的是国内解析器。
+    ///
+    /// 只在 TUN 下判：系统代理本来就不接管 DNS，那条路必然落到系统解析器上，
+    /// 拿它报警等于对所有人常亮一盏黄灯。TUN 则承诺「DNS 我管了」——管到
+    /// 国内解析器去，就是把访问过的域名交给了本地运营商。
+    var dnsEgressSuspect: Bool {
+        tunUp && dnsResolverChecked && dnsResolverCountry == "CN"
+    }
 
     /// UDP 出口和 HTTP 出口不是同一个——也就是 WebRTC 泄漏。
     ///
@@ -128,6 +167,28 @@ struct Snapshot {
         return hit && miss
     }
 
+    /// 国内 STUN 节点回的地址，网页读不读得到。
+    ///
+    /// 和 `stunLeak` 问的不是同一件事，两条必须能同时成立：
+    ///
+    /// - `stunLeak` 要境外节点自相矛盾，它回答「UDP 有没有被有选择地放出去」；
+    /// - 这一条只要国内节点给出一个不属于当前出口的公网地址就成立，它回答
+    ///   「有没有一个真实地址已经交给网页了」。
+    ///
+    /// 实测过最容易漏的一种：TCP 走代理、UDP 全直连，五个 STUN 节点（含境外）
+    /// 全回同一个家庭地址。境外节点之间并不分裂，`stunLeak` 是 false，
+    /// 但浏览器把那个地址作为 ICE 候选交给了任何网页——包括境外页面。
+    ///
+    /// 国内节点一定走直连，所以「国内节点回了非基线地址」这条证据不依赖
+    /// 境外节点的表现；境外节点全都不符多半是基线过期，不报。
+    var stunExposed: [String] {
+        guard maskFresh, !egressMask.isEmpty, !egressMask.contains(":"),
+              stunChecked else { return [] }
+        let domestic = stunDomestic.filter { Probe.isPublicIP($0) }
+        guard !domestic.isEmpty else { return [] }
+        return domestic.filter { !Probe.matchesMask($0, egressMask) }.sorted()
+    }
+
     var verdict: Verdict {
         if !claudeRunning { return .idle }
         if connections.direct > 0 { return .danger }
@@ -135,6 +196,8 @@ struct Snapshot {
             // 出口在位还要再看两眼：规则只做了一半的时候，主状态会显示
             // 「守护中」，但域名解析或 UDP 已经绕出去了。
             if dnsSuspect { return .warn }
+            if dnsEgressSuspect { return .warn }
+            if !stunExposed.isEmpty { return .warn }
             if stunLeak { return .warn }
             return .safe
         }
@@ -159,13 +222,15 @@ struct Snapshot {
         if !claudeRunning {
             switch idleState {
             case .notower: return "先让塔扫描一次"
-            case .stale:   return "基线过期了"
+            case .stale:   return egressPending ? "出口变了，等你确认" : "基线过期了"
             case .blocked: return "先别启动 Claude"
             case .ready:   return "可以启动 Claude"
             }
         }
         if connections.direct > 0 { return "发现 Claude 公网物理路由" }
         if dnsSuspect { return "DNS 未接管" }
+        if dnsEgressSuspect { return "DNS 解析出口在国内" }
+        if !stunExposed.isEmpty { return "WebRTC 在暴露真实地址" }
         if stunLeak { return "UDP 出口不一致" }
         // 带上 verdict 判断：升级标记只描述「曾经持续没接管」，
         // 出口回来了它可能还挂着，那时候标题必须跟着 verdict 走。
@@ -178,6 +243,17 @@ struct Snapshot {
         if connections.direct > 0 { return connections.detail }
         if dnsSuspect {
             return "出口在位，但 claude.ai 解析成了真实地址（\(dnsIP)）——TUN 开着却没接管 DNS，分流规则可能只做了一半。"
+        }
+        if dnsEgressSuspect {
+            let who = dnsResolverOrg.isEmpty ? "国内解析器" : dnsResolverOrg
+            return "TUN 接管了查询，但真正做递归的是 \(who)（\(Probe.maskResolver(dnsResolverIP))）——"
+                + "访问过的域名它都看得见。把客户端的 nameserver 换成境外 DoH，并让 DNS 查询跟着规则走节点。"
+        }
+        if !stunExposed.isEmpty {
+            let bad = stunExposed.map(Probe.maskIP).joined(separator: "、")
+            return "国内 STUN 节点回了 \(bad)，和当前出口不是同一个。分流上这是正确答案，"
+                + "但浏览器的 ICE 候选是交给任何网页的，境外页面照样读得到——真实地址已经交出去了。"
+                + "把 3478 / 5349 / 19302 的 UDP 直接拒掉最省事（塔的「置顶分流修复」里端口策略选「直接拒绝」）。"
         }
         if stunLeak {
             let good = stunForeign.filter { Probe.matchesMask($0, egressMask) }
@@ -196,9 +272,12 @@ struct Snapshot {
     private var idleNote: String {
         switch idleState {
         case .notower:
-            return "哨兵手上没有塔的基线：时区漂移和 UDP 出口都没法比对。先打开 Claude Tower 扫一次，数据会自动接上。"
+            return "时区基线还没有（只有塔能建）：打开 Claude Tower 扫一次。出口基线哨兵会自己测，不用等塔。"
         case .stale:
-            return "塔记的基线超过 24 小时（或还缺出口/时区），不再拿来比对 UDP。去塔里再扫一次再启动 Claude。"
+            if egressPending {
+                return "哨兵测到的出口和基线对不上，没有直接改。确认是你自己换了节点后，才会拿新出口继续比对 UDP。"
+            }
+            return "出口基线超过 24 小时没重新测到。哨兵会自己重测；恢复之前不拿它判断 UDP 出口。"
         case .ready:
             return "当前环境正常：出口在位，DNS、UDP 出口和时区都对得上。可以启动 Claude 了。"
         case .blocked:
@@ -209,6 +288,16 @@ struct Snapshot {
             }
             if dnsSuspect {
                 return "出口在位，但 claude.ai 解析成了真实地址（\(dnsIP)）——TUN 开着却没接管 DNS。先把 DNS 接管修好再启动 Claude。"
+            }
+            if dnsEgressSuspect {
+                let who = dnsResolverOrg.isEmpty ? "国内解析器" : dnsResolverOrg
+                return "查询被 TUN 接管了，但真正做递归的是 \(who)（\(Probe.maskResolver(dnsResolverIP))），"
+                    + "访问过的域名它都看得见。把客户端的 nameserver 换成境外 DoH、让 DNS 查询跟着规则走节点，再启动 Claude。"
+            }
+            if !stunExposed.isEmpty {
+                let bad = stunExposed.map(Probe.maskIP).joined(separator: "、")
+                return "国内 STUN 节点回了 \(bad)，和当前出口不是同一个——WebRTC 会把它当作候选交给任何网页。"
+                    + "把 3478 / 5349 / 19302 的 UDP 直接拒掉，再启动 Claude。"
             }
             if stunLeak {
                 let bad = stunForeign.filter { !Probe.matchesMask($0, egressMask) }
@@ -286,13 +375,14 @@ enum Probe {
     }
 
     static func run(baselineTz: String, egressMask: String = "", maskFresh: Bool = false,
-                    ruleGuard: RuleGuard? = nil, forceStun: Bool = false,
-                    forceFresh: Bool = false, forceTransport: Bool = false,
-                    takeoverSince: TimeInterval = 0) -> Snapshot {
+                    egressPending: Bool = false, ruleGuard: RuleGuard? = nil,
+                    forceStun: Bool = false, forceFresh: Bool = false,
+                    forceTransport: Bool = false, takeoverSince: TimeInterval = 0) -> Snapshot {
         var s = Snapshot()
         s.baselineTz = baselineTz
         s.egressMask = egressMask
         s.maskFresh = maskFresh
+        s.egressPending = egressPending
         let procs = processList()
         s.claudeRunning = procs.contains { $0.contains("/Claude.app/Contents/MacOS/Claude") }
         s.proxyClients = proxyHits(procs)
@@ -331,10 +421,19 @@ enum Probe {
             s.dnsIP = d.ip
             s.dnsFake = d.fake
             s.dnsChecked = d.checked
+            // 「有没有被接管」和「谁在解析」是两个问题：前者看假地址，
+            // 后者只能让解析器自己报地址。分开查、分开显示。
+            let de = dnsEgressProbe(force: forceFresh, idle: !s.claudeRunning,
+                                    key: key)
+            s.dnsResolverIP = de.ip
+            s.dnsResolverOrg = de.org
+            s.dnsResolverCountry = de.country
+            s.dnsResolverChecked = de.checked
             let st = stunProbe(force: forceStun || forceFresh,
                                idle: !s.claudeRunning, key: key)
             s.stunAll = st.all
             s.stunForeign = st.foreign
+            s.stunDomestic = st.domestic
             s.stunChecked = st.checked
             // 传输诊断只回答「这一刻能不能把 HTTPS 送出去」，不进 verdict：
             // 一次握手成功证明不了之后每个包都安全，失败也不该直接终止 Claude。
@@ -346,6 +445,26 @@ enum Probe {
             s.transportLabel = tv.label
             s.transportDetail = tv.detail
             s.transportAt = tr.at
+            // Claude 自己的边缘节点看到的是谁。和传输诊断一样只描述这一刻，
+            // 不进 verdict——这里要抓的是「两个域名走了不同的路」，
+            // 而不是又一条能触发急停的证据。
+            let dr = domainEgressProbe(force: forceFresh, idle: !s.claudeRunning,
+                                       key: key, mask: egressMask)
+            let dv = domainEgressVerdict(dr, mask: egressMask, maskFresh: maskFresh)
+            s.domainChecked = dr.checked
+            s.domainState = dv.state
+            s.domainLabel = dv.label
+            s.domainDetail = dv.detail
+            s.domainAt = dr.at
+            // 这一份结果同时就是哨兵自己的「HTTP 出口」测量：它走的是
+            // 系统代理 / TUN，和 UDP 的 STUN 是两条独立路径，正好拿来做基线。
+            // 两个域名报出不同地址时不采信——那说明分流把两条路分开了，
+            // 拿其中任何一条当基线都会把另一条判成泄漏。
+            let reached = [dr.ai, dr.com].filter { $0.reached }
+            if let first = reached.first, reached.allSatisfy({ $0.ip == first.ip }) {
+                s.egressCandidateIP = first.ip
+                s.egressCandidateCountry = first.loc
+            }
         } else {
             dropProbeCaches()
         }
@@ -610,6 +729,128 @@ enum Probe {
         ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.")
     }
 
+    // MARK: - 读解析器出口
+
+    /// 真正做递归的解析器是谁。
+    ///
+    /// fake-ip 是本地伪造的地址，在任何上游查询之前就生成好了：拿到它只能
+    /// 证明「查询被接管」，证明不了后面由谁解析。要问出这个答案，只能让
+    /// 解析器自己报出地址——`o-o.myaddr.l.google.com` 的 TXT 记录由 Google
+    /// 的权威服务器填写，内容是发起这次递归的解析器地址。
+    ///
+    /// 归属查询只把**解析器地址**发出去，不发本机地址，请求走当前代理；
+    /// 查不到归属时只报「已取到、归属未确认」，不替用户猜国家。
+    struct DnsResolverResult {
+        var ip = ""
+        var org = ""
+        var country = ""
+        var checked = false
+    }
+
+    static let resolverActiveTTL: TimeInterval = 60
+    private static let resolverLock = NSLock()
+    private static var resolverCache: (at: Date, key: String, idle: Bool,
+                                       result: DnsResolverResult)?
+    private static var resolverGeoCache: (ip: String, at: Date,
+                                          org: String, country: String)?
+
+    /// `dig +short TXT` 会把答案连着引号打出来，一条记录也可能有多个字符串。
+    /// 只认第一个像 IP 的片段，`ns` / `ip` 这类标签直接跳过。
+    static func parseResolverTXT(_ text: String) -> String {
+        for raw in text.split(separator: "\n") {
+            let line = raw.replacingOccurrences(of: "\"", with: " ")
+            for token in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+                let value = String(token)
+                if isIPAddress(value) { return value }
+            }
+        }
+        return ""
+    }
+
+    static func dnsEgressProbe(force: Bool = false, idle: Bool = false,
+                               key: String = "") -> DnsResolverResult {
+        let ttl = idle ? idleProbeTTL : resolverActiveTTL
+        resolverLock.lock()
+        if !force, let c = resolverCache, c.key == key, c.idle == idle,
+           Date().timeIntervalSince(c.at) < ttl {
+            resolverLock.unlock()
+            return c.result
+        }
+        resolverLock.unlock()
+
+        var out = DnsResolverResult()
+        let text = sh("/usr/bin/dig", ["+short", "+time=2", "+tries=1",
+                                       "TXT", "o-o.myaddr.l.google.com"],
+                      timeout: 3.0)
+        out.ip = parseResolverTXT(text)
+        if !out.ip.isEmpty {
+            out.checked = true
+            let geo = resolverGeo(out.ip)
+            out.org = geo.org
+            out.country = geo.country
+        }
+        resolverLock.lock()
+        resolverCache = (Date(), key, idle, out)
+        resolverLock.unlock()
+        return out
+    }
+
+    /// 解析器归属。同一台解析器一小时查一次就够——它不会分钟级换国家。
+    private static func resolverGeo(_ ip: String) -> (org: String, country: String) {
+        resolverLock.lock()
+        if let g = resolverGeoCache, g.ip == ip,
+           Date().timeIntervalSince(g.at) < 3600 {
+            resolverLock.unlock()
+            return (g.org, g.country)
+        }
+        resolverLock.unlock()
+        guard let url = URL(string: "https://ip.net.coffee/api/iprisk/\(ip)") else {
+            return ("", "")
+        }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 5
+        cfg.timeoutIntervalForResource = 6
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.urlCache = nil
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieStorage = nil
+        cfg.httpAdditionalHeaders = ["User-Agent": "ClaudeShield dns-resolver-check",
+                                     "Accept": "application/json"]
+        let session = URLSession(configuration: cfg)
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 5
+        let sem = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var body: Data?
+        let task = session.dataTask(with: req) { data, _, _ in
+            lock.lock()
+            body = data
+            lock.unlock()
+            sem.signal()
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + 6) == .timedOut {
+            task.cancel()
+            session.invalidateAndCancel()
+            return ("", "")
+        }
+        session.finishTasksAndInvalidate()
+        lock.lock()
+        let data = body
+        lock.unlock()
+        guard let data = data,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return ("", "") }
+        let country = ((obj["countryCode"] as? String) ?? "").uppercased()
+        let org = (obj["company_name"] as? String)
+            ?? (obj["asOrganization"] as? String) ?? ""
+        resolverLock.lock()
+        resolverGeoCache = (ip, Date(), org, country)
+        resolverLock.unlock()
+        return (org, country)
+    }
+
     // MARK: - 打 STUN（WebRTC 泄漏）
 
     /// 并发打几个 STUN 服务器，拿回它们看到的我们的公网地址。
@@ -628,12 +869,18 @@ enum Probe {
         dnsLock.lock()
         dnsCache = nil
         dnsLock.unlock()
+        resolverLock.lock()
+        resolverCache = nil
+        resolverLock.unlock()
         stunLock.lock()
         stunCache = nil
         stunLock.unlock()
         transportLock.lock()
         transportCache = nil
         transportLock.unlock()
+        domainLock.lock()
+        domainCache = nil
+        domainLock.unlock()
     }
 
     static func stunProbe(force: Bool = false, idle: Bool = false,
@@ -668,6 +915,7 @@ enum Probe {
         ]
         var all = Set<String>()
         var foreign = Set<String>()
+        var domestic = Set<String>()
         let lock = NSLock()
         let group = DispatchGroup()
         let until = Date().addingTimeInterval(5)
@@ -677,7 +925,7 @@ enum Probe {
                 guard let ip = stunQuery(host, port, until: until) else { return }
                 lock.lock()
                 all.insert(ip)
-                if isForeign { foreign.insert(ip) }
+                if isForeign { foreign.insert(ip) } else { domestic.insert(ip) }
                 lock.unlock()
             }
         }
@@ -685,7 +933,8 @@ enum Probe {
         // 不因为一个节点超时就把整轮判成失败
         _ = group.wait(timeout: .now() + 7)
 
-        let out = StunResult(all: all.sorted(), foreign: foreign.sorted(), checked: !all.isEmpty)
+        let out = StunResult(all: all.sorted(), foreign: foreign.sorted(),
+                             domestic: domestic.sorted(), checked: !all.isEmpty)
         stunLock.lock()
         stunCache = (Date(), key, idle, out)
         stunLock.unlock()
@@ -694,10 +943,12 @@ enum Probe {
 
     /// 一次 STUN 探测的结果。
     struct StunResult {
-        /// 所有服务器看到的地址，含国内节点。只用来展示，不用来判泄漏。
+        /// 所有服务器看到的地址，含国内节点。
         var all: [String] = []
-        /// 只有境外节点看到的。这才是判泄漏的依据。
+        /// 只有境外节点看到的。判「UDP 有没有进隧道」的依据。
         var foreign: [String] = []
+        /// 只有国内节点看到的。判「网页读不读得到真实地址」的依据。
+        var domestic: [String] = []
         var checked = false
     }
 
@@ -991,12 +1242,260 @@ enum Probe {
         return ep
     }
 
+    // MARK: - Claude 边缘出口
+
+    struct TraceEndpoint {
+        var host = ""
+        var ip = ""
+        var loc = ""
+        var colo = ""
+        var error = ""
+        var reached: Bool { !ip.isEmpty }
+    }
+
+    struct DomainEgressResult {
+        var checked = false
+        var ai = TraceEndpoint()
+        var com = TraceEndpoint()
+        var at = 0.0
+    }
+
+    struct DomainEgressVerdict {
+        var state = "off"
+        var label = ""
+        var detail = ""
+    }
+
+    /// 两个写死的 Claude 域名。Cloudflare 的 `/cdn-cgi/trace` 会回
+    /// 边缘节点看到的来源地址——这正是 Claude 自己的视角。
+    static let domainTargets = [
+        ("claude.ai", "https://claude.ai/cdn-cgi/trace"),
+        ("claude.com", "https://claude.com/cdn-cgi/trace"),
+    ]
+    static let domainActiveTTL: TimeInterval = 120
+    private static let domainLock = NSLock()
+    private static var domainCache: (at: Date, key: String, idle: Bool,
+                                     mask: String, result: DomainEgressResult)?
+
+    static func isIPAddress(_ raw: String) -> Bool {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, raw, &v4) == 1 { return true }
+        var v6 = in6_addr()
+        return inet_pton(AF_INET6, raw, &v6) == 1
+    }
+
+    /// trace 只有几行 `k=v`。只要 ip、loc、colo，别的字段一律不看。
+    static func parseTrace(_ body: String) -> (ip: String, loc: String, colo: String)? {
+        var vals: [String: String] = [:]
+        for line in body.split(separator: "\n") {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<eq])
+            guard key == "ip" || key == "loc" || key == "colo" else { continue }
+            vals[key] = String(line[line.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+        }
+        guard let ip = vals["ip"], isIPAddress(ip) else { return nil }
+        return (ip, (vals["loc"] ?? "").uppercased(), (vals["colo"] ?? "").uppercased())
+    }
+
+    static func ipFamily(_ ip: String) -> Int { ip.contains(":") ? 6 : 4 }
+
+    /// 纯函数，测试直接喂构造好的结果。
+    ///
+    /// 无基线、地址族不同、只取到一条，都不下「泄漏」结论——这一项要抓的是
+    /// 「两个域名走了不同的路」，证据不够时沉默比编一个结论更安全。
+    static func domainEgressVerdict(_ r: DomainEgressResult, mask: String,
+                                    maskFresh: Bool) -> DomainEgressVerdict {
+        var v = DomainEgressVerdict()
+        guard r.checked else { return v }
+        let eps = [r.ai, r.com].filter { $0.reached }
+        guard !eps.isEmpty else {
+            v.state = "off"
+            v.label = "没取到"
+            v.detail = "两个 Claude 域名的 /cdn-cgi/trace 都没回可用的地址；"
+                + "可能被分流规则拦了，也可能当前网络到 Cloudflare 不通。"
+            return v
+        }
+        guard !mask.isEmpty, maskFresh else {
+            v.state = "warn"
+            v.label = "已取到 · 无基线"
+            v.detail = "Claude 域名能报出出口地址，但还没有可用的出口基线，"
+                + "判断不了它和这次出口是不是同一条路。"
+            return v
+        }
+        let family = ipFamily(mask)
+        let comparable = eps.filter { ipFamily($0.ip) == family }
+        if comparable.isEmpty {
+            v.state = "warn"
+            v.label = "地址族不同"
+            v.detail = "Claude 边缘看到的是另一种地址族的地址，"
+                + "和基线 \(Probe.maskIP(mask)) 没法直接比对。"
+            return v
+        }
+        if Set(comparable.map { $0.ip }).count > 1 {
+            v.state = "warn"
+            v.label = "两个域名出口不同"
+            v.detail = "claude.ai 与 claude.com 报出了不同的出口地址。"
+                + "分流规则可能只写了其中一个，另一个按默认规则走了别的路。"
+            return v
+        }
+        if comparable.contains(where: { !matchesMask($0.ip, mask) }) {
+            v.state = "warn"
+            v.label = "与基线不一致"
+            v.detail = "Claude 边缘看到的地址和出口基线对不上，"
+                + "这次请求可能没走代理，或者走的是另一条分流路径。"
+            return v
+        }
+        if eps.count < 2 {
+            v.state = "warn"
+            v.label = "只取到一个域名"
+            v.detail = "另一个 Claude 域名没回可用的地址；已取到的这个虽然和基线一致，"
+                + "但不能据此判断两个域名走了同一条路。"
+            return v
+        }
+        if comparable.count < eps.count {
+            v.state = "warn"
+            v.label = "部分无法比对"
+            v.detail = "至少一个域名给出了另一种地址族的地址；"
+                + "这一部分既不按一致算，也不按不一致算。"
+            return v
+        }
+        v.state = "ok"
+        v.label = "与基线一致"
+        v.detail = "claude.ai 与 claude.com 的边缘节点看到的地址，"
+            + "和出口基线一致。"
+        return v
+    }
+
+    static func domainEgressProbe(force: Bool = false, idle: Bool = false,
+                                  key: String = "", mask: String = "") -> DomainEgressResult {
+        let ttl = idle ? idleProbeTTL : domainActiveTTL
+        domainLock.lock()
+        if !force, let c = domainCache, c.key == key, c.idle == idle, c.mask == mask,
+           Date().timeIntervalSince(c.at) < ttl {
+            domainLock.unlock()
+            return c.result
+        }
+        domainLock.unlock()
+
+        let lock = NSLock()
+        let group = DispatchGroup()
+        var eps = [TraceEndpoint](repeating: TraceEndpoint(), count: domainTargets.count)
+        for (i, target) in domainTargets.enumerated() {
+            DispatchQueue.global(qos: .utility).async(group: group) {
+                let ep = requestTrace(host: target.0, target: target.1)
+                lock.lock()
+                eps[i] = ep
+                lock.unlock()
+            }
+        }
+        _ = group.wait(timeout: .now() + 8)
+
+        var out = DomainEgressResult()
+        out.checked = true
+        out.at = Date().timeIntervalSince1970
+        out.ai = eps[0]
+        out.com = eps.count > 1 ? eps[1] : TraceEndpoint()
+        domainLock.lock()
+        domainCache = (Date(), key, idle, mask, out)
+        domainLock.unlock()
+        return out
+    }
+
+    private static func requestTrace(host: String, target: String) -> TraceEndpoint {
+        var ep = TraceEndpoint()
+        ep.host = host
+        guard let url = URL(string: target) else {
+            ep.error = "other"
+            return ep
+        }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 5
+        cfg.timeoutIntervalForResource = 6
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.urlCache = nil
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.httpCookieStorage = nil
+        cfg.httpAdditionalHeaders = ["User-Agent": "ClaudeShield domain-check"]
+        let session = URLSession(configuration: cfg)
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 5
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue("", forHTTPHeaderField: "Cookie")
+        req.setValue("", forHTTPHeaderField: "Authorization")
+
+        let sem = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var data: Data?
+        var failure: Error?
+        let task = session.dataTask(with: req) { body, _, err in
+            lock.lock()
+            data = body
+            failure = err
+            lock.unlock()
+            sem.signal()
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + 7) == .timedOut {
+            task.cancel()
+            session.invalidateAndCancel()
+            ep.error = "timeout"
+            return ep
+        }
+        session.invalidateAndCancel()
+        if let e = failure {
+            ep.error = classifyTransportError(e)
+            return ep
+        }
+        guard let body = data, body.count <= 16384,
+              let text = String(data: body, encoding: .utf8),
+              let parsed = parseTrace(text) else {
+            ep.error = "format"
+            return ep
+        }
+        ep.ip = parsed.ip
+        ep.loc = parsed.loc
+        ep.colo = parsed.colo
+        return ep
+    }
+
     /// 把 IPv4 打码成 `1.2.*.4`。日志和面板都不该留下完整真实地址——
     /// 检测泄漏的日志自己变成泄漏，是这类工具最容易犯的错。
     static func maskIP(_ ip: String) -> String {
         let p = ip.split(separator: ".")
         guard p.count == 4 else { return ip }
         return "\(p[0]).\(p[1]).*.\(p[3])"
+    }
+
+    /// 解析器地址上屏前的打码。maskIP 只认 IPv4，解析器走 IPv6 时原样
+    /// 打出去就等于我们自己泄一次，所以这里单独补一条。
+    static func maskResolver(_ ip: String) -> String {
+        guard ip.contains(":") else { return maskIP(ip) }
+        let head = ip.split(separator: ":").prefix(2).joined(separator: ":")
+        return head.isEmpty ? "" : head + ":****"
+    }
+
+    /// 这个地址会不会被网页当成真实公网候选。
+    ///
+    /// 局域网地址被 mDNS 藏掉、fake-ip 只是内核内部标记，两者都不构成暴露。
+    /// 只处理 IPv4：STUN 的解析只取 AF_INET，IPv6 那条链路还没做。
+    ///
+    /// 100.64.0.0/10 是运营商级 NAT，看着像公网其实不是——家里宽带在
+    /// 运营商 NAT 后面时，STUN 回的就是这个段，它不指向这台机器。
+    static func isPublicIP(_ ip: String) -> Bool {
+        if ip.isEmpty { return false }
+        if ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") { return false }
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4,
+              let a = Int(parts[0]), let b = Int(parts[1]) else { return false }
+        if a == 10 || a == 127 { return false }
+        if a == 192 && b == 168 { return false }
+        if a == 172 && (16...31).contains(b) { return false }
+        if a == 169 && b == 254 { return false }
+        if a == 100 && (64...127).contains(b) { return false }
+        return true
     }
 
     /// 比对打码地址：`1.2.*.4` 对上 `1.2.3.4`。

@@ -9,9 +9,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.ccclean.app</string>
 	<key>CFBundleVersion</key>
-	<string>2.19.5</string>
+	<string>2.19.9</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.19.5</string>
+	<string>2.19.9</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>

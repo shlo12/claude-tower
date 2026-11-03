@@ -27,12 +27,13 @@ sys.path.insert(0, str(ROOT))
 
 from core import (  # noqa: E402
     align, browserwebrtc, checklist, cleaner, compat, deep, ipcheck, ipv6cfg,
-    isolation, leaderboard, netcfg, privacy, proxyfix, proxydiag, regioncfg,
-    rules, scanner, shield, tower, uninstall, updater, watch, wizard,
+    isolation, leaderboard, location, netcfg, privacy, proxyfix, proxydiag,
+    regioncfg, rules, scanner, shellproxy, shield, tower, uninstall, updater,
+    watch, wizard,
 )
 
 WEB = ROOT / "web"
-VERSION = "2.19.5"
+VERSION = "2.19.9"
 PRIVACY_TOKEN = secrets.token_urlsafe(32)
 # 每次启动重新生成的会话令牌。所有 /api/ 请求都要带上它（X-CClean-Token）。
 # 用自定义头而不是 cookie，是因为自定义头会强制浏览器先发 OPTIONS 预检，
@@ -89,8 +90,8 @@ def _scan_cached(force: bool = False) -> dict:
     return scan
 
 
-def _egress_baseline() -> tuple[str, int | None]:
-    """塔记录的出口（打码后）与它的年龄。
+def _egress_baseline() -> tuple[str, int | None, bool]:
+    """塔记录的出口（打码后）、它的年龄，以及是不是有未确认的新出口。
 
     浏览器侧 WebRTC 的判定需要一个「出口应该是什么」的参照，
     这份参照和哨兵用的是同一个来源——shield.json 里的 egressIP。
@@ -99,7 +100,9 @@ def _egress_baseline() -> tuple[str, int | None]:
     data = shield.read()
     mask = str(data.get("egressIP") or "")
     at = int(data.get("egressAt") or 0)
-    return mask, (max(0, int(time.time()) - at) if at else None)
+    age = max(0, int(time.time()) - at) if at else None
+    # 哨兵测到的出口和基线对不上、还在等用户确认：这条基线不能拿来定罪。
+    return mask, age, bool(data.get("egressSeen"))
 
 
 def _tower_payload(force_scan: bool = False, with_scan: bool = False) -> dict:
@@ -179,18 +182,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/api/privacy", "/api/ipv6", "/api/proxyfix",
-                           "/api/region", "/api/align"):
+                           "/api/region", "/api/align", "/api/location",
+                           "/api/shellproxy"):
             # 这几个接口自己用 PRIVACY_TOKEN，而且要先把令牌发给页面，不能走统一闸门
             if not self._local_request():
                 return self._err("只允许本地应用页面访问", 403)
             if parsed.path == "/api/proxyfix":
+                # DNS 解析器统一是独立的一件事，单独问一次，别把它塞进规则状态：
+                # 规则那张卡读失败时不该连带把 DNS 这一块也弄成不可用。
+                if (parse_qs(parsed.query).get("dns") or [""])[0] == "1":
+                    return self._json({"ok": True, "token": PRIVACY_TOKEN,
+                                       **proxyfix.dns_status()})
                 # 端口策略是用户在预览前选的，覆盖统计得按他选的那种算，
                 # 否则预览里写的规则和实际会写下去的不是一回事。
                 mode = (parse_qs(parsed.query).get("port") or [""])[0]
                 return self._json({"ok": True, "token": PRIVACY_TOKEN,
                                    **proxyfix.status(mode)})
             module = {"privacy": privacy, "ipv6": ipv6cfg,
-                      "region": regioncfg, "align": align}[
+                      "region": regioncfg, "align": align,
+                      "location": location, "shellproxy": shellproxy}[
                           parsed.path.rsplit("/", 1)[-1]]
             return self._json({"ok": True, "token": PRIVACY_TOKEN, **module.status()})
         if parsed.path.startswith("/api/"):
@@ -205,7 +215,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # 先过闸门再读 body：没通过校验的请求连 4KB 的 JSON 都不必解析
         if path not in ("/api/privacy", "/api/ipv6", "/api/proxyfix",
-                        "/api/region", "/api/align") \
+                        "/api/region", "/api/align", "/api/location",
+                        "/api/shellproxy") \
                 and path.startswith("/api/") and not self._guard():
             return
 
@@ -244,7 +255,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN
             ):
                 return self._err("请求来源无效，请重新打开本应用页面", 403)
-            if not isinstance(body, dict) or body.get("action") not in ("apply", "undo") \
+            if not isinstance(body, dict) or body.get("action") not in (
+                    "apply", "undo", "dns", "dns-undo") \
                     or body.get("confirm") is not True:
                 return self._err("请先预览并确认要执行的操作")
             try:
@@ -346,18 +358,55 @@ class Handler(BaseHTTPRequestHandler):
             # 先校验形状再谈基线：形状不对就没必要为它跑一次完整扫描。
             if not isinstance(body, dict) or not isinstance(body.get("candidates"), list):
                 return self._err("缺少 candidates 字段", 400)
-            mask, age = _egress_baseline()
+            mask, age, pending = _egress_baseline()
             if not mask:
                 # 还没有基线就先扫一次，否则这一项永远只能回「无法比对」
                 _scan_cached(force=True)
-                mask, age = _egress_baseline()
+                mask, age, pending = _egress_baseline()
             try:
-                verdict = browserwebrtc.save(body, mask=mask, age=age)
+                verdict = browserwebrtc.save(body, mask=mask, age=age,
+                                             pending=pending)
             except ValueError as exc:
                 return self._err(str(exc), 400)
             # 结论变了，缓存作废；下一次取塔数据会重新算分
             STATE["scan"] = None
             return self._json({"ok": True, "verdict": verdict})
+
+        if path == "/api/probe/location":
+            # 读定位服务开关要管理员授权，所以只由用户点按钮触发：
+            # 放进常规扫描等于每次体检都拦一道密码框。
+            if not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN
+            ):
+                return self._err("请求来源无效，请重新打开本应用页面", 403)
+            if not isinstance(body, dict) or body.get("confirm") is not True:
+                return self._err("需要确认后才会请求系统授权", 400)
+            result = location.refresh()
+            if result.get("error"):
+                return self._err(result["error"], 400)
+            STATE["scan"] = None
+            return self._json({"ok": True, **result})
+
+        if path == "/api/shellproxy":
+            if not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN
+            ):
+                return self._err("请求来源无效，请重新打开本应用页面", 403)
+            action = body.get("action") if isinstance(body, dict) else ""
+            if action not in ("plan", "apply", "undo"):
+                return self._err("未知操作")
+            # 预览不需要确认；真正动文件的两个动作都要
+            if action != "plan" and body.get("confirm") is not True:
+                return self._err("请先预览并确认要执行的操作")
+            try:
+                if action == "plan":
+                    return self._json({"ok": True, **shellproxy.plan(body.get("port"))})
+                result = (shellproxy.apply(body.get("port")) if action == "apply"
+                          else shellproxy.undo())
+                STATE["scan"] = None
+                return self._json({"ok": True, **result})
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                return self._err(str(exc), 400)
 
         if path == "/api/timezone":
             if not body.get("confirm"):

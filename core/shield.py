@@ -1,17 +1,23 @@
 """与 Claude Shield 共用的状态文件。
 
-塔写基线（时区、出口国家、打码后的出口 IP），Shield 只读基线、写自己的开关
-与命中记录。所以写入必须是「先读、只改自己那几个键、再原子写回」——
-直接覆盖会把用户的开关、暂停时间和命中记录一起抹掉。
+基线（时区、出口国家、打码后的出口 IP）两边都会写：塔在扫描后写一次，
+哨兵每天用 Claude 边缘的 trace 结果自己续期——不开塔也不会过期。
+所以写入必须是「先读、只改自己那几个键、再原子写回」，直接覆盖会把
+用户的开关、暂停时间和命中记录一起抹掉。
 
 字段归属：
-    塔写    baselineTz / country / egressIP / egressAt / ruleGuard
+    塔写    baselineTz / ruleGuard
+    两边写  country / egressIP / egressAt / egressSeen*
     Shield 写 enabled / level / pausedUntil / hits / interval / loginIntent
-    谁都不该动对方的键。
+    谁都不该动对方的键；出口那一组按时间戳取新的那份。
 
 egressIP 存的是打码后的地址（`1.2.*.4`），不是完整 IP。Shield 拿它跟 STUN
 探测到的地址做掩码比对，判断 UDP 出口和 HTTP 出口是不是同一个——这是检测
 WebRTC 泄漏唯一不需要联网就能做的判据，而且不必把真实 IP 落到磁盘上。
+
+测到的出口和基线不同时，任何一方都不许直接改基线：写进 egressSeen 等用户
+确认。基线是「UDP 出口该长什么样」的参照，悄悄跟着新值走的话，真泄漏会
+被当成正常。
 """
 from __future__ import annotations
 
@@ -107,8 +113,26 @@ def _write(data: dict) -> bool:
     return True
 
 
+def _clear_seen(data: dict, at: int) -> bool:
+    """撤掉待确认出口。
+
+    清空时也写 egressSeenAt：Shield 用 max(egressAt, egressSeenAt) 判断
+    哪一端写得更晚，留一个时间戳，「已清空」才能压住被撤掉的旧候选。
+    """
+    if not data.get("egressSeen") and not data.get("egressSeenCountry"):
+        return False
+    data["egressSeen"] = ""
+    data["egressSeenCountry"] = ""
+    data["egressSeenAt"] = at
+    return True
+
+
 def write_baseline(scan: dict | None) -> bool:
-    """把这一轮检测到的时区、出口国家与出口 IP 写给 Shield。没有变化就不写盘。"""
+    """把这一轮检测到的时区、出口国家与出口 IP 写给 Shield。没有变化就不写盘。
+
+    出口和已有基线对不上时不改基线，只写 egressSeen 等用户确认——基线是
+    「UDP 出口该长什么样」的参照，塔自己跟着换等于把真泄漏洗成正常。
+    """
     if not isinstance(scan, dict):
         return False
     tz = ((scan.get("system") or {}).get("timezone") or "").strip()
@@ -120,6 +144,7 @@ def write_baseline(scan: dict | None) -> bool:
         return False
 
     data = read()
+    now = int(time.time())
     changed = False
     if data.get("version") != VERSION:
         data["version"] = VERSION
@@ -129,17 +154,31 @@ def write_baseline(scan: dict | None) -> bool:
     if tz and data.get("baselineTz") != tz:
         data["baselineTz"] = tz
         changed = True
-    if country and data.get("country") != country:
-        data["country"] = country
-        changed = True
-    if egress and data.get("egressIP") != egress:
+
+    current = (data.get("egressIP") or "").strip()
+    if egress and not current:
+        # 第一次测到出口：没有参照可用，只能采用。
         data["egressIP"] = egress
-        changed = True
-    # 时间戳只在隔了一分钟以上才刷新：Shield 只在基线够新的时候才敢拿它
-    # 比对出口，但连续两次扫描（打开页面就会扫）不该各写一次盘。
-    now = int(time.time())
-    if egress and now - int(data.get("egressAt") or 0) >= 60:
         data["egressAt"] = now
+        _clear_seen(data, now)
+        changed = True
+    elif egress and data.get("egressSeen") != egress:
+        if egress == current:
+            # 回到基线：撤掉待确认，时间戳隔一分钟以上才续期——Shield 只在
+            # 基线够新时才比对出口，但打开页面就会扫，不该每次都写盘。
+            if _clear_seen(data, now):
+                changed = True
+            if now - int(data.get("egressAt") or 0) >= 60:
+                data["egressAt"] = now
+                changed = True
+        else:
+            # 出口变了：不动基线，只记候选，等用户点「是我换的」。
+            data["egressSeen"] = egress
+            data["egressSeenAt"] = now
+            data["egressSeenCountry"] = country
+            changed = True
+    if country and data.get("country") != country and not data.get("egressSeen"):
+        data["country"] = country
         changed = True
     if not changed:
         return False

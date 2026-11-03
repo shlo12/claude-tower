@@ -33,7 +33,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import netprobe, stun
+from . import netprobe, regioncfg, stun
 
 HOME = Path.home()
 STATE_DIR = HOME / ".ccclean"
@@ -45,6 +45,11 @@ VERSION = 1
 MAX_CANDIDATES = 200
 MAX_LINE = 400
 MAX_UA = 160
+# 浏览器报的语言列表通常只有几条；给足余量但不接受无限长。
+MAX_LANGS = 12
+MAX_LANG = 32
+MAX_TZ = 64
+MAX_LOCALE = 32
 
 # 基线超过这个岁数就不拿来定罪。和 shield.py 认出口的窗口保持一致：
 # 一天前记录的出口，今天可能已经换了三个节点。
@@ -140,12 +145,14 @@ def _verdict(state: str, title: str, detail: str, advice: str = "") -> dict:
     return {"state": state, "title": title, "detail": detail, "advice": advice}
 
 
-def assess(summary: dict, mask: str = "", age: int | None = None) -> dict:
+def assess(summary: dict, mask: str = "", age: int | None = None,
+           pending: bool = False) -> dict:
     """判定浏览器报出来的地址算不算泄漏。
 
     state 取值：pass / leak / stale / hidden / lan / relay / unknown / empty。
     `stale` 和 `leak` 必须分开：基线过期时不一致是正常的，报成泄漏只会
-    教用户忽略这个告警。
+    教用户忽略这个告警。`pending` 是「基线还没确认的出口」——这时不一致
+    同样不能定罪，但原因不是老了，不能借「过了一天」那句话。
     """
     srflx = summary.get("srflx") or []
     if srflx:
@@ -194,6 +201,14 @@ def assess(summary: dict, mask: str = "", age: int | None = None) -> dict:
                 "pass",
                 "浏览器报出的地址与出口一致",
                 "STUN 反射地址和塔记录的出口吻合，WebRTC 这条路上没有额外暴露。",
+            )
+        if pending:
+            return _verdict(
+                "stale",
+                "出口变了，还没确认",
+                "哨兵测到的 HTTP 出口和基线对不上，还在等你确认。确认之前不拿"
+                "旧基线给 WebRTC 定罪——换了节点还是真泄漏，这一步分不出来。",
+                "在哨兵面板确认出口，或先查代理；确认以后重跑本项。",
             )
         if age is not None and age > STALE_AFTER:
             return _verdict(
@@ -253,7 +268,107 @@ def _masked(summary: dict) -> dict:
     }
 
 
-def save(payload: dict, mask: str = "", age: int | None = None) -> dict:
+def _clean_languages(value) -> list[str]:
+    """页面报上来的语言列表：去重、截断、丢掉非字符串。"""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value[:MAX_LANGS]:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()[:MAX_LANG]
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def assess_fingerprint(browser: dict, egress_country: str = "",
+                       system_langs=None, system_tz: str = "") -> dict:
+    """浏览器自己报出来的语言 / 区域格式 / 时区。
+
+    `navigator.languages` 和 `Intl.DateTimeFormat().resolvedOptions()` 拿到的是
+    **浏览器的**设置，不是系统的 AppleLocale：Chrome 有自己的界面语言，改系统
+    设置改不到它。所以这一项和 `locale.lang` / `locale.region` 不重复——它专
+    门测「系统改成了英文，浏览器还留着中文」那种漏。
+
+    只报事实，不定严重程度：是不是问题取决于出口在哪个国家，那是扫描侧的
+    政策（`scanner._check_browser_fingerprint`），这里不替它决定。
+    """
+    box = browser if isinstance(browser, dict) else {}
+    langs = _clean_languages(box.get("languages"))
+    tz = str(box.get("timeZone") or "")[:MAX_TZ]
+    locale = str(box.get("locale") or "")[:MAX_LOCALE]
+    region = regioncfg.parse_region(locale)
+    first = langs[0] if langs else ""
+    system = [str(x) for x in (system_langs or []) if str(x or "").strip()]
+    out = {
+        "state": "no-data",
+        "first": first,
+        "languages": langs,
+        "region": region,
+        "timeZone": tz,
+        "locale": locale,
+        "egressCountry": (egress_country or "").strip().upper(),
+        "systemFirst": system[0] if system else "",
+        "systemDiffers": bool(first and system and first.lower() != system[0].lower()),
+        "title": "",
+        "detail": "",
+        "advice": "",
+    }
+    if not (langs or tz or locale):
+        out.update(
+            title="浏览器指纹还没实测",
+            detail="系统语言和区域格式只能说明系统设置是什么；浏览器有自己的语言列表与时区，"
+                   "改系统设置改不到它。这一项只能由浏览器自己回答。",
+            advice="点「在本机浏览器里实测」，页面会连同 ICE 候选一起回传语言、时区与区域格式。",
+        )
+        return out
+
+    if first.lower().startswith("zh"):
+        out.update(
+            state="zh-first",
+            title=f"浏览器首选语言为 {first}",
+            detail="`navigator.languages` 的第一位是中文，它会随请求进入 Accept-Language。"
+                   "这是外部探针最常标红的一项，也是最容易被漏掉的一层——"
+                   "系统语言改成英文并不会连带改掉浏览器自己的语言列表。",
+            advice="在浏览器设置里把语言改成目标语言并「移到顶部」，移除中文项后重启浏览器；"
+                   "Chrome / Edge 的语言设置与 macOS 的系统语言是两份独立的配置。",
+        )
+        return out
+
+    if region and out["egressCountry"] and region != out["egressCountry"]:
+        out.update(
+            state="region-mismatch",
+            title=f"浏览器区域格式为 {region}，出口在 {out['egressCountry']}",
+            detail=f"`Intl.DateTimeFormat().resolvedOptions().locale` 报的是 {locale}，"
+                   "它跟浏览器的界面语言走，不跟系统的 AppleLocale 走。"
+                   "网页里读到的日期、数字格式和这个值是同一份设置。",
+            advice="把浏览器的界面语言改成与出口一致的语言；系统的区域格式由「区域格式」那张卡片单独管。",
+        )
+        return out
+
+    if tz and system_tz and tz != system_tz:
+        out.update(
+            state="tz-differs",
+            title=f"浏览器时区为 {tz}，系统为 {system_tz}",
+            detail="浏览器的时区与系统不一致，通常是因为浏览器有自己的覆盖（某些配置档案或插件），"
+                   "或者浏览器在系统改时区之前就启动了。网页读到的时间戳偏移会跟着浏览器走。",
+            advice="重启浏览器让它重新读取系统时区；如果仍然不同，检查浏览器配置档案或时区类插件。",
+        )
+        return out
+
+    out.update(
+        state="ok",
+        title="浏览器自己报的语言、区域与时区都一致",
+        detail="浏览器报出来的语言首位、区域格式与时区，和系统设置及当前出口对得上。",
+    )
+    return out
+
+
+def save(payload: dict, mask: str = "", age: int | None = None,
+         pending: bool = False) -> dict:
     """收下页面 POST 上来的候选，判定后落盘。返回给页面看的结论。"""
     raw = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
@@ -262,12 +377,22 @@ def save(payload: dict, mask: str = "", age: int | None = None) -> dict:
         raw = raw[:MAX_CANDIDATES]
 
     summary = summarize(raw)
-    verdict = assess(summary, mask, age)
-    ua = payload.get("ua") if isinstance(payload, dict) else ""
+    verdict = assess(summary, mask, age, pending)
+    box = payload if isinstance(payload, dict) else {}
+    ua = box.get("ua") or ""
+    # 语言 / 时区 / 区域格式顺路收下：同一次 POST，不额外发请求。它们不参与
+    # ICE 判定，只留给 `assess_fingerprint` 在读取时按当时的出口再判一次——
+    # 出口换了，同一个浏览器值的结论也会变，所以不在写入时定死。
+    browser = {
+        "languages": _clean_languages(box.get("languages")),
+        "timeZone": str(box.get("timeZone") or "")[:MAX_TZ],
+        "locale": str(box.get("intlLocale") or "")[:MAX_LOCALE],
+    }
     record = {
         "version": VERSION,
         "at": int(time.time()),
         "ua": str(ua or "")[:MAX_UA],
+        "browser": browser,
         "summary": _masked(summary),
         "assessment": verdict,
     }

@@ -39,7 +39,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import compat, kernelcheck, proxydns, stun, telemetry
+from . import (compat, kernelcheck, proxydns, proxyguard, resolveregress, stun,
+               telemetry, terminalegress)
 
 HOME = Path.home()
 CLAUDE_DIR = HOME / ".claude"
@@ -1387,36 +1388,89 @@ def check_dns_route(behavior: dict | None = None, state: dict | None = None) -> 
                  ev, "网络恢复后重新扫描。")
 
 
-def check_proxy_dns(state: dict | None = None, report: dict | None = None) -> dict:
-    """代理内核自己的 DNS 名单。
+def _resolver_name(r: dict) -> str:
+    return r.get("org") or "国内解析器"
+
+
+def _resolver_label(r: dict) -> str:
+    bits = [r.get("org") or "", r.get("masked") or ""]
+    country = (r.get("country") or "").upper()
+    if country:
+        bits.append(country)
+    return " · ".join(b for b in bits if b) or "未知"
+
+
+def check_proxy_dns(state: dict | None = None, report: dict | None = None,
+                    resolver: dict | None = None,
+                    egress: dict | None = None) -> dict:
+    """代理内核自己的 DNS 名单，加上实测的解析器出口。
 
     TUN 接管后 macOS 的 DNS 设置会被绕过：系统把查询发给谁不重要，真正
     解析域名的是客户端内核的 nameserver。只看 `scutil` 会把「系统 DNS
-    干净」当成结论。这里读运行中客户端当前生效的配置，并把三组名单分开：
+    干净」当成结论。这里读运行中客户端当前生效的配置，并把四组名单分开：
 
     - 解析域名用（nameserver / fallback / direct-nameserver）：访问的每个
       域名都经过这里，命中国内解析器才算泄漏面；
+    - 国内域名用（nameserver-policy，比如 geosite:cn）：只把国内域名交给
+      国内解析器，让 GEOIP,CN 拿到国内地址、命中直连；代理域名不受影响；
     - 启动解析用（default-nameserver）：只用来解析 DoH 服务器自己的域名；
     - 节点域名用（proxy-server-nameserver）：只解析代理节点地址，国内解析
       是正常且必要的，不参与判定。
+
+    名单只说明配置写了什么。上游把明文 53 截走、或 fallback 悄悄接手时，
+    名单可以是干净的而解析仍发生在国内——所以再加一次实测（`resolveregress`），
+    由解析器自己报出地址。没有出口时不测，那等于自己制造一次泄漏。
+
+    有了本次 HTTP 出口国家（`egress`），还要比一次：解析器在哪个国家、出口
+    在哪个国家。两者不同不是「国内解析」，但外部的 DNS 泄漏探针会把这一项
+    标红，所以按低风险记录，而不是替用户判成一致。
     """
     st = _transport_state() if state is None else state
     rep = proxydns.collect() if report is None else report
+    if resolver is None:
+        resolver = resolveregress.probe() if st.get("tunneled") else {}
+    # 完整地址只留在内存里做判定；这一层产出的数据可能落盘，只带打码后的。
+    r = {k: v for k, v in (resolver or {}).items() if k != "ip"}
+    measured = r if r.get("checked") else None
+    leaked = bool(measured and (measured.get("country") or "").upper() == "CN")
+    egress_country = ((egress or {}).get("country") or "").upper()
+    resolver_country = ((measured or {}).get("country") or "").upper()
+    mismatch = bool(measured and resolver_country and egress_country
+                    and resolver_country != egress_country)
     data = {
         "system": rep["system"],
         "systemDomestic": rep["systemDomestic"],
         "clients": rep["clients"],
         "domesticDestination": rep["domesticDestination"],
         "domesticNode": rep["domesticNode"],
+        "domesticProxied": rep.get("domesticProxied"),
+        "domesticDirect": rep.get("domesticDirect"),
+        "domesticPolicy": rep.get("domesticPolicy") or [],
+        "unrelayed": rep.get("unrelayed") or [],
+        "providers": rep.get("providers") or [],
+        "mixedProviders": bool(rep.get("mixedProviders")),
         "note": rep["note"],
+        "resolver": r,
+        "resolverCountry": resolver_country,
+        "egressCountry": egress_country,
+        "countryMismatch": mismatch,
     }
     ev = [_ev("系统 DNS", ", ".join(rep["system"]) or "未知", mono=True)]
+    if measured:
+        ev.append(_ev("解析出口", _resolver_label(measured), mono=True))
     if not rep["clients"]:
-        item = _item(
-            "net.proxy_dns", "network", "没读到代理内核的 DNS 配置", "info",
-            rep["note"] + "。系统 DNS 不等于内核 DNS：TUN 接管时，真正解析域名的是"
-            "客户端自己的名单；这一项只说明读不到，不代表没有国内解析器。",
-            ev)
+        detail = (rep["note"] + "。系统 DNS 不等于内核 DNS：TUN 接管时，真正解析域名的是"
+                  "客户端自己的名单；这一项只说明读不到，不代表没有国内解析器。")
+        title = "没读到代理内核的 DNS 配置"
+        severity = "info"
+        if leaked:
+            detail += f"不过实测递归出口是 {_resolver_label(measured)}，查询确实落在国内解析器上。"
+            title = f"解析器出口在国内（{_resolver_name(measured)}）"
+            severity = "medium" if st.get("tunneled") else "info"
+        elif mismatch:
+            detail += (f"实测递归出口在 {resolver_country}，本次出口在 {egress_country}；"
+                       "两者不同会让外部探针的 DNS 国家一项变红，但递归本身不在国内。")
+        item = _item("net.proxy_dns", "network", title, severity, detail, ev)
         item["dns"] = data
         return item
 
@@ -1425,35 +1479,382 @@ def check_proxy_dns(state: dict | None = None, report: dict | None = None) -> di
                      + (" · " + client["mode"] if client["mode"] else ""), mono=True))
     if client["destination"]:
         ev.append(_ev("解析域名用", ", ".join(client["destination"]), mono=True))
+    policy_pairs = [(e["selector"], e["server"]) for e in (client.get("policy") or [])]
+    if policy_pairs:
+        ev.append(_ev("国内域名解析用",
+                      ", ".join(f"{sel} = {proxydns.label(srv)}" for sel, srv in policy_pairs),
+                      mono=True))
     if client["node"]:
         ev.append(_ev("节点域名用", ", ".join(client["node"]), mono=True))
     if client["bootstrap"]:
         ev.append(_ev("启动解析用", ", ".join(client["bootstrap"]), mono=True))
 
     domestic = rep["domesticDestination"]
-    if domestic:
-        names = "、".join(proxydns.label(v) for v in domestic[:4])
-        detail = f"访问的域名会交给客户端的 nameserver 解析，里面有国内解析器（{names}）。"
-        if st.get("tunneled"):
-            detail += "TUN/系统代理在位时，macOS 的 DNS 设置会被绕过，真正看到域名的是这一组。"
-        else:
-            detail += "客户端当前没有接管流量，这一项目前只记录配置，等接管后才会生效。"
-        if rep["domesticNode"]:
-            detail += "「节点域名用」那一组只解析代理节点地址，不算泄漏，可以保留。"
-        item = _item(
-            "net.proxy_dns", "network",
-            f"代理内核 DNS 混用国内解析器（{names}）",
-            "medium" if st.get("tunneled") else "info",
-            detail, ev,
-            "在客户端的 DNS 设置里删掉 nameserver 里的国内解析器，只留境外 DoH/IP；"
-            "节点域名解析可以继续用国内。")
+    # 代理域名（nameserver/fallback）与直连域名（direct-nameserver）分开算：
+    # 只有前者决定别人递归时看到谁。没有拆分字段的报告按代理域名处理，宁可多报。
+    proxied = rep.get("domesticProxied")
+    if proxied is None:
+        proxied, direct = domestic, []
     else:
+        direct = [v for v in domestic if v not in proxied]
+    policy = rep.get("domesticPolicy") or []
+    policy_selectors: list[str] = []
+    for entry in client.get("policy") or []:
+        if (proxydns.is_domestic(entry["server"], rep["system"])
+                and entry["selector"] not in policy_selectors):
+            policy_selectors.append(entry["selector"])
+    if proxied or leaked:
+        parts = []
+        if proxied:
+            names = "、".join(proxydns.label(v) for v in proxied[:4])
+            parts.append(f"访问的域名会交给客户端的 nameserver 解析，里面有国内解析器（{names}）。")
+            if st.get("tunneled"):
+                parts.append("TUN/系统代理在位时，macOS 的 DNS 设置会被绕过，真正看到域名的是这一组。")
+            else:
+                parts.append("客户端当前没有接管流量，这一项目前只记录配置，等接管后才会生效。")
+            if rep["domesticNode"]:
+                parts.append("「节点域名用」那一组只解析代理节点地址，不算泄漏，可以保留。")
+            title = f"代理内核 DNS 混用国内解析器（{names}）"
+        else:
+            title = f"解析器出口在国内（{_resolver_name(measured)}）"
+        if leaked:
+            who = _resolver_label(measured)
+            if proxied:
+                parts.append(f"实测递归出口也是 {who}，和名单一致。")
+            else:
+                parts.append(f"名单里没有国内解析器，但实测递归出口是 {who}：配置干净不等于"
+                             "解析发生在境外，明文 53 可能被截获，或上游被转给了国内递归。")
+                if direct:
+                    parts.append("「直连域名用」那组里也有国内解析器（"
+                                 + "、".join(proxydns.label(v) for v in direct[:4])
+                                 + "），它只解析直连域名。")
+            if mismatch:
+                parts.append(f"本次 HTTP 出口在 {egress_country}，解析器在 {resolver_country}，"
+                             "外部探针会同时标出这两个国家。")
+            advice = ("把客户端 DNS 改成境外 DoH（如 https://1.1.1.1/dns-query），"
+                      "并确认内核真的按这份名单解析；改完重新扫描，看到「解析出口」"
+                      "换成境外才算修好——名单和实测都要换。"
+                      "两个容易漏的点：① 境外 DoH 后面加 `#<代理组>`，否则查询从本机 IP"
+                      "直接发出；② 国内域名用 `nameserver-policy` 时按白名单写"
+                      "（只对 `geosite:cn` 指国内），别用 `geolocation-!cn` 这类取反的"
+                      "名单——名单外的域名会掉回默认解析器，泄漏探针的随机域名正是名单外的。")
+        else:
+            advice = ("在客户端的 DNS 设置里删掉 nameserver 里的国内解析器，只留境外 DoH/IP；"
+                      "节点域名解析可以继续用国内。")
         item = _item(
-            "net.proxy_dns", "network", "代理内核 DNS 只用境外解析器", "pass",
-            "nameserver 里没有国内解析器。节点域名即使走国内解析，也只暴露代理节点地址。",
-            ev)
+            "net.proxy_dns", "network", title,
+            "medium" if (st.get("tunneled") or leaked) else "info",
+            "".join(parts), ev, advice)
+    elif direct or policy:
+        parts = []
+        if policy:
+            servers = "、".join(proxydns.label(v) for v in policy[:4])
+            selectors = "、".join(policy_selectors[:4]) or "国内域名"
+            parts.append(f"「国内域名用」把 {selectors} 的解析交给国内解析器（{servers}）："
+                         "这样 GEOIP,CN 能拿到国内地址、命中直连规则；代理域名的解析"
+                         "仍然只走境外名单，不受影响。")
+        if direct:
+            names = "、".join(proxydns.label(v) for v in direct[:4])
+            parts.append(f"「直连域名用」里的 {names} 只解析本来就直连的域名。直连流量本身"
+                         "从本机 IP 发出，解析落回国内不会额外暴露访问目标。")
+        if measured:
+            parts.append(f"实测递归出口是 {_resolver_label(measured)}，代理域名的解析与名单一致。")
+        if mismatch:
+            parts.append(f"不过它的归属是 {resolver_country}，本次出口在 {egress_country}："
+                         "外部探针的「DNS 国家」会因此变红，递归本身不在国内。")
+        advice = ("这两组只服务国内/直连域名。要让直连查询也不落在国内，可以换成境外 DoH；"
+                  "代理域名的解析不受影响。")
+        if policy:
+            names = "、".join(proxydns.label(v) for v in policy[:4])
+            title = f"国内域名用国内解析器（{names}）"
+        else:
+            names = "、".join(proxydns.label(v) for v in direct[:4])
+            title = f"直连域名用国内解析器（{names}）"
+        item = _item("net.proxy_dns", "network", title, "info",
+                     "".join(parts), ev, advice)
+    else:
+        detail = "nameserver 里没有国内解析器。节点域名即使走国内解析，也只暴露代理节点地址。"
+        if measured:
+            detail += f"实测递归出口是 {_resolver_label(measured)}。"
+        unrelayed = rep.get("unrelayed") or []
+        providers = [p for p in (rep.get("providers") or []) if p != "system"]
+        if unrelayed:
+            names = "、".join(proxydns.label(v) for v in unrelayed[:4])
+            detail += (f"不过 {names} 没挂「查询走代理」的后缀（`#<代理组>`）：内核会把这条查询"
+                       "从本机 IP 直接发出去，解析器记下的是真实地址，和 HTTP 走的不是同一条路。"
+                       "DNS 泄漏探针看不到这一层——它只问解析器在哪，不问查询从哪个 IP 发出。")
+            if mismatch:
+                detail += (f"另外解析器归属 {resolver_country}、本次出口在 {egress_country}，"
+                           "探针会把「DNS 国家」一项标红。")
+            item = _item(
+                "net.proxy_dns", "network", f"DNS 查询没走代理（{names}）", "low",
+                detail, ev + [_ev("查询出口", "本机 IP（未挂代理后缀）", mono=True)],
+                "在 DoH 地址后面加 `#<代理组>`，例如 `https://1.1.1.1/dns-query#PROXY`，"
+                "组名必须是配置里真实存在的代理组；加了之后这条查询从该组出去，解析器看到的是"
+                "代理侧地址。内核的 `respect-rules` 通常被客户端强制关掉，指望它按分流规则走不可靠。"
+                "改完重新扫描，看「解析出口」是否换成代理侧地址。",
+            )
+        elif len(providers) >= 2:
+            names = "、".join(proxydns.provider_label(p) for p in providers[:4])
+            tail = ""
+            if mismatch:
+                tail = (f"本次实测解析出口在 {resolver_country}、HTTP 出口在 "
+                        f"{egress_country}，就是这条的表现。")
+            item = _item(
+                "net.proxy_dns", "network",
+                f"DNS 出口会在多个服务商之间跳（{names}）", "low",
+                detail + f"这一组同时挂着 {names}。内核是并行发查询、谁先回用谁，"
+                         f"所以同一个域名这次由这家解析、下次换另一家，而配置一个字都没动。"
+                         f"不同厂商的递归出口不在同一片网络里：Cloudflare 在入口 PoP 就地"
+                         f"解析，地理跟着出口走；Google 常从自己的骨干网出去，出口在美东时"
+                         f"它可能报在蒙特利尔。结果就是泄漏探针上的「DNS 出口」在城市甚至"
+                         f"国家之间来回变。{tail}",
+                ev + [_ev("解析器服务商", names, mono=True)],
+                "只留一家。同一家的多个地址可以都留着（比如 1.1.1.1 + 1.0.0.1），"
+                "它们走同一片网络，出口不会跨区。优先留 Cloudflare：它在入口 PoP 解析，"
+                "DNS 归属会跟着出口走；Google 的递归出口由它自己的骨干网决定，"
+                "对不上你的出口。改完重新扫描，看「解析出口」是否固定在一处。",
+            )
+        elif mismatch:
+            item = _item(
+                "net.proxy_dns", "network",
+                f"解析器国家与出口不一致（{resolver_country} / {egress_country}）", "low",
+                detail + f"递归出口在 {resolver_country}，HTTP 出口在 {egress_country}。"
+                         "递归本身不在国内，但外部探针会把「DNS 国家」一项标红；"
+                         "1.1.1.1 这类 anycast 解析器常被归到美国。",
+                ev + [_ev("出口国家", f"HTTP {egress_country} · DNS {resolver_country}",
+                          mono=True)],
+                "把 nameserver 换成与出口同区、同国的境外 DoH；或者接受探针上的这一项红叉——"
+                "它不是国内解析器，也不改变递归发生的位置。",
+            )
+        else:
+            item = _item(
+                "net.proxy_dns", "network", "代理内核 DNS 只用境外解析器", "pass",
+                detail, ev)
     item["dns"] = data
     return item
+
+
+def check_proxy_fallback(guard: dict | None = None) -> dict:
+    """节点全挂时会不会退到直连。
+
+    `select` 组的 DIRECT 只是「可以手动选」，不在这里定罪；真正的失败面是
+    fallback / url-test / load-balance 组：它们会在节点失败或测速时自己挑
+    成员，DIRECT 一旦在名单里，请求就可能从本机真实地址出去。默认成员
+    （第一个）就是 DIRECT 的组，还要再算一条「规则指向它时默认直连」。
+    """
+    g = proxyguard.inspect() if guard is None else guard
+    if not g.get("checked"):
+        return _item(
+            "net.proxy_fallback", "network",
+            "没读到代理客户端的回落策略", "info",
+            (g.get("note") or "没找到正在运行的 Clash 系客户端配置")
+            + "。读不到不等于回落安全：自动组里列了 DIRECT 时，节点失败就会退到直连。",
+            [], "启动代理客户端后重新扫描。",
+        )
+
+    tun = g.get("tun") or {}
+    tun_on = tun.get("enable") is True
+    strict = tun.get("strict-route")
+    ev = []
+    if g.get("final"):
+        ev.append(_ev("最终规则", f"MATCH → {g['final']}", mono=True))
+    eco = g.get("eco") or []
+    ev.append(_ev("Claude 规则",
+                  "、".join(f"{e['payload']} → {e['target']}" for e in eco[:3])
+                  if eco else "无（按最终规则走）", mono=True))
+    open_groups = g.get("failopen") or []
+    if open_groups:
+        ev.append(_ev("含 DIRECT 的自动组",
+                      "、".join(f"{x['name']}（{x['type']}，第 {x['index'] + 1} 位）"
+                               for x in open_groups[:4]), mono=True))
+    if tun_on:
+        ev.append(_ev("严格路由", {True: "已开启", False: "未开启"}.get(strict, "未配置"),
+                      mono=True))
+
+    strict_tip = ""
+    if tun_on and strict is not True:
+        strict_tip = ("TUN 已启用，但 tun.strict-route 没有打开：部分 UDP 与旁路流量可能"
+                      "不走隧道。它不是判泄漏的依据（WebRTC / IPv6 的实测才是），只是一条可补的口子。")
+
+    hits = g.get("defaultDirect") or []
+    if hits:
+        first = hits[0]
+        if first.get("payload") == "MATCH":
+            title = f"最终规则直接放行（MATCH → {first['target']}）"
+            detail = ("没有命中任何 Claude 规则时，请求按最终规则直接放行，从本机真实地址出去。"
+                      "Claude 的域名如果不在前面被显式指向代理，就会落到这里。")
+        else:
+            title = f"Claude 规则指向直连（{first.get('payload')}）"
+            detail = ("这条规则把 Claude 的域名交给了直连（或默认成员是 DIRECT 的组）。"
+                      "出口检测看到的海外地址与 Claude 实际看到的不是同一条路。")
+        advice = ("把 Claude 规则的目标改成代理组，或把组里默认的 DIRECT 换成 REJECT；"
+                  "改完重新扫描，确认「出口」与终端探测一致。")
+        if strict_tip:
+            advice += " " + strict_tip
+        return _item("net.proxy_fallback", "network", title, "high",
+                     detail, ev, advice)
+
+    reachable = [x for x in open_groups if x.get("reachable")]
+    if reachable:
+        names = "、".join(x["name"] for x in reachable[:3])
+        detail = ("fallback / url-test / load-balance 会在节点失败或测速时自己挑成员。"
+                  "组里列了 DIRECT，节点全挂时请求就从本机真实地址出去——分流规则这时"
+                  "看起来仍然全部命中。它至少能被规则或上层选择组选中，属于真实的回落面。")
+        advice = ("把这个组里的 DIRECT 换成 REJECT（拒绝）或 REJECT-DROP；"
+                  "要保留直连能力就单开一个 select 组，不要放在自动组里。")
+        if strict_tip:
+            advice += " " + strict_tip
+        return _item("net.proxy_fallback", "network",
+                     f"自动回落组里有 DIRECT（{names}）", "medium",
+                     detail, ev, advice)
+
+    if open_groups:
+        names = "、".join(x["name"] for x in open_groups[:3])
+        return _item(
+            "net.proxy_fallback", "network",
+            f"回落组里有 DIRECT，但没有规则指向它（{names}）", "low",
+            "这些组列了 DIRECT，但当前没有任何规则或上层组能走到它们；"
+            "风险只在于以后改了规则或手动选中。",
+            ev, "清理掉自动组里的 DIRECT 更省心；不清也暂时不会被走到。"
+                + ((" " + strict_tip) if strict_tip else ""),
+        )
+
+    detail = "fallback / url-test / load-balance 组里没有 DIRECT；节点失败时不会退到直连。"
+    if strict_tip:
+        detail += " " + strict_tip
+    return _item("net.proxy_fallback", "network", "代理回落不会退到直连", "pass",
+                 detail, ev, strict_tip)
+
+
+def check_proxy_drift(guard: dict | None = None) -> dict:
+    """Claude 走的那条路上，有没有会自己换节点的组。
+
+    和 `check_proxy_fallback` 问的不是一件事：那一条问「节点全挂时会不会退到
+    直连」，这一条问「平时会不会自己换出口」。fallback / url-test /
+    load-balance 会按测速或失败自己挑成员，用户什么都没做，出口 IP 已经换了。
+
+    Claude 只认出口 IP：同一份订阅里的节点落在不同 AS、不同城市，切一次就是
+    一次新的关联信号。而分流规则这时候全部命中、回落也没有 DIRECT，检测全绿。
+    今天实际踩到的就是这个：出口 IP 一直是同一个，但组是自动测速的，随时会变。
+
+    不判 `select`：select 组换节点要用户自己按，属于「已经在固定出口」的做法。
+    """
+    g = proxyguard.inspect() if guard is None else guard
+    if not g.get("checked"):
+        return _item(
+            "net.proxy_drift", "network",
+            "没读到代理客户端的代理组", "info",
+            (g.get("note") or "没找到正在运行的 Clash 系客户端配置")
+            + "。读不到不等于出口固定：自动测速组会自己换节点。",
+            [], "启动代理客户端后重新扫描。",
+        )
+
+    eco = g.get("eco") or []
+    drift = g.get("drift") or []
+    ev = []
+    if g.get("final"):
+        ev.append(_ev("最终规则", f"MATCH → {g['final']}", mono=True))
+    ev.append(_ev("Claude 规则",
+                  "、".join(f"{e['payload']} → {e['target']}" for e in eco[:3])
+                  if eco else "无（按最终规则走）", mono=True))
+    if drift:
+        ev.append(_ev("会自己换节点的组",
+                      "、".join(f"{x['group']}（{x['type']}）" for x in drift[:4]),
+                      mono=True))
+
+    if not drift:
+        return _item(
+            "net.proxy_drift", "network", "Claude 的出口不会被自动切走", "pass",
+            "Claude 域名经过的组都是 select 或直接是节点，换节点要用户自己按。"
+            "同一个账号长期落在同一个出口上，这是最省事的做法。",
+            ev, "",
+        )
+
+    # 有 Claude 专用规则、但那条规则落到了自动组上：出口会漂，且和「最终规则」
+    # 用同一批节点，看起来像在分流，其实没分开。
+    if eco:
+        first = next((x for x in drift if x["kind"] == "Claude 规则"), None)
+        if first:
+            detail = (f"Claude 域名指向的 {first['group']} 是 {first['type']} 组，"
+                      "它会按测速结果自己挑成员。测速每轮都可能换人，同一个账号的"
+                      "出口 IP 就会跟着换——规则全部命中、回落也没有 DIRECT，"
+                      "所有检测都是绿的，只有 Claude 那边看到你在跳。")
+            advice = ("给 Claude 单独建一个 select 组（成员放一个固定节点），"
+                      "把 Claude 的四条域名规则指向它。select 不会自己动，"
+                      "换节点变成你的显式动作。代价是节点挂了要自己切，"
+                      "所以组里再放一个备用节点，别放 DIRECT。")
+            return _item("net.proxy_drift", "network",
+                         f"Claude 走的是自动测速组（{first['group']}）", "medium",
+                         detail, ev, advice)
+
+    names = "、".join(x["group"] for x in drift[:3])
+    detail = (f"没有 Claude 专用规则，Claude 跟最终规则一起走 {names}（自动测速组）。"
+              "整个代理都在漂，Claude 只是其中一个。对只用 Claude 的机器，"
+              "这仍然意味着出口不固定。")
+    advice = ("要固定的话，把 Claude 的四条域名规则指到一个 select 组，"
+              "只放你打算长期用的那个节点；其余流量继续用自动组。")
+    return _item("net.proxy_drift", "network",
+                 f"出口由自动测速组决定（{names}）", "low",
+                 detail, ev, advice)
+
+
+def check_terminal_egress(net_info: dict | None = None) -> dict:
+    """终端里实际发请求的出口，和本次探测是不是同一个。
+
+    Claude Code 在终端里跑，继承的是登录 shell 的代理变量。curl 不读 macOS
+    的系统代理：浏览器走代理、终端直连，是「网页全绿、CLI 裸奔」最常见的原因。
+    只在出口确认后发请求——没有出口时跑一次，等于自己制造一次泄漏。
+    """
+    info = net_info or {}
+    if not info.get("available") or not info.get("ip"):
+        return _item(
+            "net.terminal_egress", "network", "终端出口未检测", "info",
+            "出口地址还没确认，没有在登录 shell 里发请求。", [],
+            "出口确认后再扫一次。",
+        )
+    r = terminalegress.probe(info.get("ip") or "", info.get("ip_masked") or "")
+    ev = [_ev("登录 shell", r.get("shell") or "zsh", mono=True)]
+    if r.get("ipMasked"):
+        where = " · ".join(x for x in (r.get("loc"), r.get("colo")) if x)
+        ev.append(_ev("终端看到的出口", r["ipMasked"] + (f" · {where}" if where else ""),
+                      mono=True))
+    ev.append(_ev("shell 代理变量", "已设置" if r.get("proxyEnv") else "未设置"))
+    ev.append(_ev("比对基线", info.get("ip_masked") or "这次没有基线", mono=True))
+
+    if not r.get("checked"):
+        return _item(
+            "net.terminal_egress", "network", "终端出口没取到", "info",
+            "在登录 shell 里跑 curl 没拿到出口地址：" + (r.get("error") or "没有输出") +
+            "。可能 shell 启动文件卡住、curl 被拦，或当前网络到 API 边缘不通。",
+            ev, "在该终端里手动执行 curl https://api.anthropic.com/cdn-cgi/trace 看看报什么错。",
+        )
+    if r.get("match") is False:
+        return _item(
+            "net.terminal_egress", "network",
+            "终端里的出口与检测出口不同", "high",
+            f"终端（{r.get('shell') or 'zsh'}）里的 curl 从 {r.get('ipMasked')} 出去，"
+            f"和本次探测的 {info.get('ip_masked') or '基线'} 不是同一个地址。"
+            "curl 不读 macOS 的系统代理；TUN 没接管时，浏览器走代理、CLI 走直连是最常见的组合。"
+            "从终端启动的 Claude Code 会继承这条直连路径。",
+            ev,
+            "在 shell 配置里 export HTTPS_PROXY / HTTP_PROXY 指向客户端端口，或打开 TUN；"
+            "「隐私设置 → 终端代理变量」可以直接写进去（写入前会先测通这个端口，"
+            "并备份原文件，可随时撤销）。"
+            "改完在同一个终端里重跑 curl 确认出口一致，再从该终端启动 Claude Code。",
+        )
+    if r.get("match") is None:
+        return _item(
+            "net.terminal_egress", "network", "取到终端出口，但没有可比对的基线", "info",
+            f"终端从 {r.get('ipMasked')} 出去，但和基线地址族不同或基线缺失，"
+            "没法直接判断是不是同一个出口。", ev,
+            "TUN 打开并只保留一种地址族后再扫一次。",
+        )
+    return _item(
+        "net.terminal_egress", "network", "终端出口与检测一致", "pass",
+        "登录 shell 里的 curl 与本次出口探测走同一个地址；从该终端启动的 CLI 不会另开一条路。",
+        ev,
+    )
 
 
 def check_transport(online: bool = True, state: dict | None = None) -> list[dict]:
@@ -1793,18 +2194,30 @@ def check_mitm() -> dict:
 # ---------------------------------------------------------------- 3-9 IPv6 暗门
 
 
-def check_ipv6() -> dict:
+def check_ipv6(guard: dict | None = None) -> dict:
     """IPv6 泄露面。判据只覆盖 Wi-Fi，因为一键关闭也只改 Wi-Fi。
 
     以太网 / VPN 上的全局 v6 本工具不会动，不能报成「去点一下就能修」的
     中等风险；那种情况只给信息，让用户自己处理对应接口。
+
+    客户端自己的 `ipv6` 开关只作证据：系统已经没有 v6 出口时，它是关是开
+    都不构成泄漏面；系统有 v6 出口时，客户端还开着才说明这条链路更容易被
+    实际走到。
     """
     v6 = compat.ipv6_exposure()
     global6 = v6.get("sample") or []
     has_route6 = bool(v6.get("has_default_v6_route"))
+    if guard is None:
+        guard = proxyguard.inspect()
+    client_v6 = guard.get("ipv6") if guard.get("checked") else None
+    client_ev = _ev("客户端 v6", {True: "已开启（ipv6: true）",
+                                  False: "已关闭（ipv6: false）"}.get(client_v6, "未读到"))
     if not (has_route6 and global6):
+        detail = "没有全局 v6 地址或没有 v6 默认路由——代理链路不会被 v6 绕过。"
+        if client_v6 is True:
+            detail += " 客户端配置允许 v6（ipv6: true），但系统当前没有 v6 全局出口，不构成泄漏面。"
         return _item("net.ipv6", "network", "无可用 IPv6 全局出口", "pass",
-                     "没有全局 v6 地址或没有 v6 默认路由——代理链路不会被 v6 绕过。")
+                     detail, [client_ev])
 
     iface = v6.get("default_v6_iface") or ""
     wifi = compat.wifi_device() if compat.IS_MAC else ""
@@ -1812,9 +2225,15 @@ def check_ipv6() -> dict:
     ev = [
         _ev("v6 地址", _mask(global6[0]), mono=True),
         _ev("v6 默认出口", iface or "-", mono=True),
+        client_ev,
     ]
     if wifi:
         ev.append(_ev("Wi-Fi 网卡", wifi, mono=True))
+    client_note = ""
+    if client_v6 is True:
+        client_note = " 客户端也开着 v6（ipv6: true），走 v6 的请求不会被只接管 v4 的代理拦住。"
+    elif client_v6 is False:
+        client_note = " 客户端已关闭 v6（ipv6: false），这一层只剩系统网络栈。"
 
     if compat.IS_MAC and wifi and (iface == wifi or (not iface and wifi_v6)):
         return _item(
@@ -1822,7 +2241,8 @@ def check_ipv6() -> dict:
             "Wi-Fi 的 IPv6 全局直出存在泄露面",
             "medium",
             "默认 v6 出口落在 Wi-Fi 上，机器同时有全局 IPv6 地址。"
-            "多数代理只接管 v4——客户端若优先走 v6，请求会绕过代理从真实 ISP 出去。",
+            "多数代理只接管 v4——客户端若优先走 v6，请求会绕过代理从真实 ISP 出去。"
+            + client_note,
             ev,
             "「隐私设置 → IPv6 出口（Wi-Fi）」可关闭 Wi-Fi 的 IPv6（需管理员授权）并随时恢复；"
             "关闭后断开重连 Wi-Fi 再检测。以太网、VPN 等其它服务本工具不改。",
@@ -1835,7 +2255,8 @@ def check_ipv6() -> dict:
             f"{target} 上存在 IPv6 全局出口",
             "info",
             f"检测到全局 v6 地址和 v6 默认路由，但默认出口是 {target}，不是 Wi-Fi"
-            f"（{wifi or '未识别'}）。本工具的一键关闭只改 Wi-Fi，不会处理这条链路。",
+            f"（{wifi or '未识别'}）。本工具的一键关闭只改 Wi-Fi，不会处理这条链路。"
+            + client_note,
             ev,
             f"手动处理：系统设置 → 网络 → {target} → 详细信息 → TCP/IP → 配置 IPv6 → 关闭；"
             "或确认代理规则已经覆盖 v6。",
@@ -1846,7 +2267,8 @@ def check_ipv6() -> dict:
         "IPv6 全局直出存在泄露面",
         "medium",
         "这台机器有全局 IPv6 地址和 v6 默认路由。多数代理只接管 v4——"
-        "客户端若优先走 v6，请求就绕过代理从真实 ISP 直接出去。",
+        "客户端若优先走 v6，请求就绕过代理从真实 ISP 直接出去。"
+        + client_note,
         ev,
         "在系统网络设置里关闭该接口的 IPv6，或确认代理规则覆盖 v6。",
     )
@@ -1952,17 +2374,30 @@ def check_deep(net_info: dict | None = None) -> list[dict]:
         check_routing,
         check_transport,
         check_proxy_dns,
+        check_proxy_fallback,
+        check_proxy_drift,
+        check_terminal_egress,
         check_mitm,
         check_ipv6,
         check_telemetry_files,
         check_versions,
     ]
+    guard: dict | None = None
     for fn in fns:
         try:
             if fn in (check_pinned, check_transport):
                 # 只有本轮联网探测成功时才做 DNS 行为探测；关掉联网检测
                 # 还去解析域名，等于绕过用户的开关。
                 r = fn(bool((net_info or {}).get("available")))
+            elif fn is check_proxy_dns:
+                r = fn(egress=net_info)
+            elif fn is check_terminal_egress:
+                r = fn(net_info)
+            elif fn in (check_proxy_fallback, check_proxy_drift, check_ipv6):
+                # 回落、漂移与 v6 读的是同一份客户端配置，一次扫描只读一遍。
+                if guard is None:
+                    guard = proxyguard.inspect()
+                r = fn(guard)
             else:
                 r = fn()
             out.extend(r if isinstance(r, list) else [r])

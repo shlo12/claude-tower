@@ -27,8 +27,13 @@
     <p id="st-note">正在读取本机状态…</p>
   </section>
 
+  <div class="tower-warn" id="egress-warn" hidden>
+    <span id="egress-note">出口和基线对不上。</span>
+    <button id="btn-egress">是我换的</button>
+  </div>
+
   <div class="tower-warn" id="tower-warn" hidden>
-    <span id="tower-note">没有塔的基线。</span>
+    <span id="tower-note">还没有基线。</span>
     <button id="btn-tower">打开塔</button>
   </div>
 
@@ -48,10 +53,12 @@
     <li><span>TUN 接管</span><b id="f-tun">—</b></li>
     <li><span>系统代理</span><b id="f-proxy">—</b></li>
     <li><span>实际连接</span><b id="f-connections">未确认</b></li>
-    <li><span>塔记基线</span><b id="f-egress">—</b></li>
+    <li><span>基线出口</span><b id="f-egress">—</b></li>
     <li class="sep"><span>DNS</span><b id="f-dns">—</b></li>
+    <li><span>DNS 解析出口</span><b id="f-dns-egress">—</b></li>
     <li><span>UDP 出口</span><b id="f-udp">—</b></li>
     <li><span>传输</span><b id="f-transport">—</b></li>
+    <li><span>Claude 出口</span><b id="f-domain">—</b></li>
     <li class="sep"><span>当前时区</span><b id="f-tz">—</b></li>
     <li><span>基线时区</span><b id="f-btz">—</b></li>
     <li class="sep"><span>上次巡检</span><b id="f-at">—</b></li>

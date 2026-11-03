@@ -126,6 +126,45 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state, "pass")
 
 
+class ExposedTests(unittest.TestCase):
+    """国内节点回的直连地址：对分流是正确答案，对 WebRTC 是暴露。
+
+    这一组和 JudgeTests 判的是两件事，必须能同时成立：一条 UDP 走直连
+    的链路，`leak` 可以是 unknown（境外节点没分裂），但网页照样能读到
+    家里的真实地址。
+    """
+
+    def test_domestic_offbaseline_is_exposed(self):
+        ips = ["112.97.32.112", "5.34.220.136"]
+        exposed, why = stun.exposed_addresses(ips, ["112.97.32.112"], "5.34.*.136")
+        self.assertEqual(exposed, ["112.97.32.112"], why)
+
+    def test_match_is_not_exposed(self):
+        exposed, _ = stun.exposed_addresses(
+            ["5.34.220.136"], ["5.34.220.136"], "5.34.*.136")
+        self.assertEqual(exposed, [])
+
+    def test_foreign_only_offbaseline_is_not_reported(self):
+        # 境外节点全都不符、国内节点没有回应：多半是基线过期，不报
+        exposed, _ = stun.exposed_addresses(["9.9.9.9"], [], "5.34.*.136")
+        self.assertEqual(exposed, [])
+
+    def test_private_and_fake_are_ignored(self):
+        for ip in ("198.18.2.160", "192.168.1.9", "10.0.0.7", "169.254.1.1", "127.0.0.1"):
+            self.assertFalse(stun.is_public(ip), ip)
+            exposed, _ = stun.exposed_addresses([ip], [ip], "5.34.*.136")
+            self.assertEqual(exposed, [], ip)
+
+    def test_carrier_grade_nat_is_not_public(self):
+        self.assertFalse(stun.is_public("100.64.3.9"))
+        self.assertTrue(stun.is_public("100.128.3.9"))
+
+    def test_no_mask_no_exposure(self):
+        exposed, why = stun.exposed_addresses(["112.97.32.112"], ["112.97.32.112"], "")
+        self.assertEqual(exposed, [])
+        self.assertTrue(why)
+
+
 class ProbeContractTests(unittest.TestCase):
     def setUp(self):
         stun.reset_cache()
@@ -148,11 +187,25 @@ class ProbeContractTests(unittest.TestCase):
         })
         with mock.patch.object(stun, "query", query):
             r = stun.probe("5.34.*.136", timeout=0.1)
-        for k in ("ips", "foreign", "ok", "leak", "state", "mask", "reason"):
+        for k in ("ips", "foreign", "ok", "leak", "state", "mask", "reason",
+                  "exposed", "exposedLeak", "exposedReason"):
             self.assertIn(k, r)
         self.assertIsInstance(r["ips"], list)
         self.assertIsInstance(r["leak"], bool)
         self.assertIn(r["state"], ("leak", "pass", "unknown"))
+
+    def test_domestic_address_is_reported_as_exposed(self):
+        # 真实场景：TCP 走代理、UDP 走直连。境外节点没分裂（leak 为 False），
+        # 但国内节点把家里的地址交了出来。
+        query, _ = self.fake({
+            "stun.miwifi.com": "112.97.32.112",
+            "stun1.l.google.com": "112.97.32.112",
+            "stun.freeswitch.org": "112.97.32.112",
+        })
+        with mock.patch.object(stun, "query", query):
+            r = stun.probe("5.34.*.136", timeout=0.1)
+        self.assertTrue(r["exposedLeak"])
+        self.assertIn("112.97.32.112", r["exposed"])
 
     def test_single_foreign_response_is_unknown(self):
         query, _ = self.fake({"stun1.l.google.com": "5.34.220.136"})

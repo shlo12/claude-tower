@@ -36,8 +36,12 @@ CATEGORY_META = {
 # ---------- 时区 ----------
 # Claude Code 客户端被公开分析出的判定条件：系统时区命中下列值即被视为中国用户
 CN_TRIGGER_TZ = {"Asia/Shanghai", "Asia/Urumqi", "Asia/Chongqing", "Asia/Harbin", "PRC"}
-# 同一时区带（UTC+8），不直接触发标记，但会造成"时区与出口地理不一致"的信号
-GREATER_CHINA_TZ = {"Asia/Hong_Kong", "Asia/Macau", "Asia/Taipei"}
+# 同一时区带（UTC+8），不直接触发标记，但会造成"时区与出口地理不一致"的信号。
+# 香港、澳门在 Anthropic 的受限地区清单里，保留部分风险。
+GREATER_CHINA_TZ = {"Asia/Hong_Kong", "Asia/Macau"}
+# 中国台湾在 Anthropic 的支持地区清单内，单独使用时不计风险。
+# 但时区名与出口地理对不上仍然是叠加信号，所以不并进上一条，单独一档。
+SUPPORTED_TZ = {"Asia/Taipei"}
 
 # ---------- 中转地址域名特征 ----------
 OFFICIAL_HOSTS = {"api.anthropic.com", "claude.ai", "console.anthropic.com"}

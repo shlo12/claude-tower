@@ -299,6 +299,9 @@ header button.open:active {
   font-size: 11px;
   color: var(--text-3);
   letter-spacing: .5px;
+  /* 标签不能被右值挤到折行：中文在字间断行，「DNS 解析出 / 口」看起来像坏了 */
+  flex: none;
+  white-space: nowrap;
 }
 
 .facts b {

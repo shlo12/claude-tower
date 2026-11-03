@@ -86,18 +86,35 @@
       ? '哨兵暂时下班，这段时间不做任何检查。'
       : (p.note || '');
 
-    // ---- 缺塔提醒 ----
-    // 只装了 Shield 时，指标行看起来一切正常，但时区漂移和 UDP 出口
-    // 根本没法比对。这条横幅要一直挂着，直到塔真的写进基线。
+    // ---- 出口变了 ----
+    // 哨兵测到的出口和基线对不上时不直接改基线：跟着新值走，真泄漏
+    // 也会被记成正常。这里把两个地址摊开，让用户自己认一次。
+    var ew = $('#egress-warn');
+    if (p.egressSeen) {
+      var baseTxt = [p.country, p.egressMask].filter(Boolean).join(' · ') || '未知';
+      var seenTxt = [p.egressSeenCountry, p.egressSeen].filter(Boolean).join(' · ');
+      ew.hidden = false;
+      $('#egress-note').textContent = '出口和基线对不上：基线 ' + baseTxt
+        + '，现在测到 ' + seenTxt
+        + (p.egressSeenAt ? '（' + age(p.egressSeenAt) + '起）' : '')
+        + '。是你自己换的节点才确认，确认后才会拿新出口比对。';
+    } else {
+      ew.hidden = true;
+    }
+
+    // ---- 缺基线提醒 ----
+    // 没有基线时，指标行看起来一切正常，但时区漂移和 UDP 出口
+    // 根本没法比对。出口基线哨兵会自己补，时区基线只有塔能建。
     var tw = $('#tower-warn');
     var towerState = p.towerState ||
       ((p.baselineTz || p.egressMask) ? 'ok' : 'missing');
     if (towerState === 'missing') {
       tw.hidden = false;
-      $('#tower-note').textContent = '没有塔的基线：时区漂移和 UDP 出口都比对不了。';
-    } else if (towerState === 'stale') {
+      $('#tower-note').textContent = '还没有基线：时区要打开塔扫一次，出口哨兵会自己测。';
+    } else if (towerState === 'stale' && !p.egressSeen) {
+      // 出口待确认时上面那条横幅已经说清楚了，这里不再叠一句「过期」。
       tw.hidden = false;
-      $('#tower-note').textContent = '塔的基线过期了：UDP 出口暂时比对不了，去塔里再扫一次。';
+      $('#tower-note').textContent = '出口基线过期了：UDP 出口暂时比对不了，哨兵会自动重测。';
     } else {
       tw.hidden = true;
     }
@@ -164,8 +181,8 @@
 
     var fe = $('#f-egress');
     if (!p.egressMask) {
-      // 没基线不是「不适用」：时区漂移和 UDP 比对都做不了，值得标黄。
-      setFact(fe, '塔还没记过', 'warn');
+      // 没基线不是「不适用」：UDP 比对做不了，值得标黄。
+      setFact(fe, '还没测到', 'warn');
     } else {
       var parts = [];
       if (p.country) parts.push(p.country);
@@ -181,7 +198,7 @@
       }
       setFact(fe, parts.join(' · '), egressState);
     }
-    fe.title = '塔上次扫描记下的出口，不是当前出口；只存打码地址。超过 24 小时就不拿它判 UDP 泄漏。';
+    fe.title = '基线出口，不是当前出口；只存打码地址。哨兵每天自己测一次续期，超过 24 小时或出口变了就不拿它判 UDP 泄漏。';
 
     // ---- 解析 ----
     // 出口不在的时候 DNS 和 STUN 都压根没跑：那时候查一次就等于自己泄漏一次。
@@ -196,7 +213,8 @@
       dns.title = '这次没拿到结果，不降级判定——网络抖一下就报警，人会很快学会无视通知。';
     } else if (p.dnsFake) {
       setFact(dns, '隧道内 · ' + p.dns, 'ok');
-      dns.title = 'claude.ai 解析到了假地址（fake-ip），说明 DNS 被客户端接管了。';
+      dns.title = 'claude.ai 解析到了假地址（fake-ip），说明 DNS 被客户端接管了。' +
+        '这只证明查询被截走，证明不了后面由谁解析——看下一行。';
     } else if (p.dnsSuspect) {
       setFact(dns, p.dns + '（直连解析）', 'warn');
       dns.title = '解析到了真实地址。TUN 开着却拿不到假地址，说明 DNS 没被接管——' +
@@ -207,6 +225,36 @@
       dns.title = '系统代理本来就不接管 DNS，拿到真实地址是正常的——不参与判定。';
     }
 
+    // ---- 解析出口 ----
+    // 上一行只说「查询被接管了」。这一行回答「真正解析的是谁」——
+    // 第三方泄漏测试量的是这一层，漏了它就会出现「外面查出国内 DNS、我们自己全绿」。
+    var dnsEg = $('#f-dns-egress');
+    var egOrg = (p.dnsResolverOrg || p.dnsResolverCountry || '');
+    if (egOrg.length > 18) egOrg = egOrg.slice(0, 18) + '…';
+    if (!exitReady) {
+      setFact(dnsEg, '出口不在，没查', 'off');
+      dnsEg.title = '只在出口在位时才查：没有出口时查一次，等于自己制造一次泄漏。';
+    } else if (!p.dnsResolverChecked) {
+      setFact(dnsEg, '没查成', 'off');
+      dnsEg.title = '这次没拿到解析器出口，不降级判定——拿不到证据就不下结论。';
+    } else if (!p.dnsResolverCountry) {
+      setFact(dnsEg, p.dnsResolver + ' · 归属未确认', 'off');
+      dnsEg.title = '解析器地址取到了，但归属查询没有响应；不替用户猜国家。';
+    } else if (p.dnsEgressSuspect) {
+      setFact(dnsEg, (egOrg || '国内解析器') + ' · ' + p.dnsResolver, 'warn');
+      dnsEg.title = '真正做递归的是国内解析器。fake-ip 只截住了查询，真实解析仍由它完成——' +
+        '你访问的域名它都看得见。把客户端的 nameserver 换成境外 DoH，并让 DNS 查询跟着规则走节点。';
+    } else if (p.country && p.dnsResolverCountry && p.dnsResolverCountry !== p.country) {
+      setFact(dnsEg, (egOrg || p.dnsResolverCountry) + ' · ' + p.dnsResolver, 'off');
+      dnsEg.title = '解析器归属 ' + p.dnsResolverCountry + '，出口在 ' + p.country +
+        '：两者不同。递归本身不在国内，但第三方探针会把「DNS 国家」一项标红。' +
+        '想让这一项变绿，把 nameserver 换成与出口同区的境外 DoH。';
+    } else {
+      setFact(dnsEg, (egOrg || p.dnsResolverCountry) + ' · ' + p.dnsResolver, 'ok');
+      dnsEg.title = '解析器出口不在国内。这一行和上面「有没有被接管」是两个问题：' +
+        '接管看假地址，这一行看真正做递归的那台解析器。';
+    }
+
     var udp = $('#f-udp');
     var ips = p.stun || [];
     if (!exitReady) {
@@ -215,17 +263,28 @@
     } else if (!p.stunChecked) {
       setFact(udp, '没探到', 'off');
       udp.title = '四个 STUN 节点都没回。一次超时不作结论，也不报警。';
+    } else if (p.stunExposed && p.stunExposed.length) {
+      setFact(udp, '暴露 · ' + p.stunExposed.join(' / '), 'warn');
+      udp.title = '国内 STUN 节点回了这些地址，和当前出口基线不是同一个。' +
+        '分流规则把国内域名放直连，节点回真实地址是「正确答案」；' +
+        '但浏览器的 ICE 候选是交给任何网页的，境外页面同样读得到。' +
+        '最省事的做法是拒掉 3478 / 5349 / 19302 的 UDP，不依赖代理组是否支持 UDP。';
     } else if (p.stunLeak) {
       setFact(udp, '分裂 · ' + ips.join(' / '), 'warn');
       udp.title = '境外节点给出了两个不同的出口地址，说明一部分 UDP 走了直连。';
+    } else if (p.egressSeen && p.egressMask) {
+      // 基线还在，只是等用户确认新出口。说成「无基线」会让人以为塔没扫过。
+      setFact(udp, ips.join(' / ') + ' · 待确认', 'off');
+      udp.title = '出口基线还在等确认，确认之前不拿它判 UDP 泄漏——换了节点还是真泄漏，这一步分不出来。';
     } else if (!p.towerData || !p.maskFresh || !p.egressMask) {
       // 没有基线时只能证明「STUN 有回包」，证明不了它和 HTTP 出口是同一条。
       // 给绿灯等于替一个没做的比对下结论。
       setFact(udp, ips.join(' / ') + ' · 无基线', 'off');
-      udp.title = '没有可用的塔基线，只能确认 STUN 有回包，判断不了它是不是同一个出口。';
+      udp.title = '没有可用的出口基线，只能确认 STUN 有回包，判断不了它是不是同一个出口。';
     } else {
       setFact(udp, ips.join(' / '), 'ok');
-      udp.title = 'STUN 打回来的地址（含国内节点）。国内节点回真实地址是分流规则的正确结果，不参与判定。';
+      udp.title = 'STUN 打回来的地址（含国内节点）都落在当前出口上。' +
+        '国内节点走直连、回同一个地址，说明 UDP 也进了隧道。';
     }
 
     // ---- 传输 ----
@@ -253,6 +312,22 @@
       ft.title = (p.transportDetail || '')
         + (p.transportAt ? '（' + age(p.transportAt) + '测的）' : '');
       bt.disabled = false;
+    }
+
+    // ---- Claude 出口 ----
+    // Claude 自己的边缘节点看到的地址。只回答「claude.ai / claude.com 是不是
+    // 从同一个出口看我们」，不进主判定。
+    var fd = $('#f-domain');
+    if (!exitReady) {
+      setFact(fd, '出口不在，没查', 'off');
+      fd.title = '只在出口在位时查：出口不在的时候发请求，等于先把真实地址送出去一次。';
+    } else if (!p.domainChecked) {
+      setFact(fd, '还没测', 'off');
+      fd.title = '哨兵会按周期重测，和传输诊断共用出口判定。';
+    } else {
+      var dst = p.domainState === 'ok' ? 'ok' : p.domainState === 'warn' ? 'warn' : 'off';
+      setFact(fd, p.domainLabel || '—', dst);
+      fd.title = (p.domainDetail || '') + (p.domainAt ? '（' + age(p.domainAt) + '测的）' : '');
     }
 
     // ---- 时间 ----
@@ -357,7 +432,8 @@
           : h.kind === 'takeover' ? '代理未接管'
           : h.kind === 'dns' ? 'DNS 未接管'
           : h.kind === 'stun' ? 'UDP 出口分裂'
-          : h.kind === 'notower' ? '缺塔基线'
+          : h.kind === 'notower' ? '缺基线'
+          : h.kind === 'egress' ? '出口变更'
           : h.kind === 'kill' ? '终止 Claude'
           : h.kind === 'gate' ? '拦下启动'
           : h.kind === 'fixtz' ? '改时区'
@@ -367,7 +443,8 @@
         // gate 是最重的一步——连启动都不让，和 kill 同一个色。
         // dns / stun / notower 归到 gold：它们不是「断了」，是「规则没做全」。
         var cls = h.kind === 'kill' || h.kind === 'takeover' || h.kind === 'gate' ? 'danger'
-          : h.kind === 'dns' || h.kind === 'stun' || h.kind === 'notower' ? 'warn'
+          : h.kind === 'dns' || h.kind === 'stun' || h.kind === 'notower'
+            || h.kind === 'egress' ? 'warn'
           : h.kind === 'fixtz' ? 'safe'
           : h.kind;
         return '<li title="' + esc(h.note) + '">' +
@@ -426,6 +503,7 @@
     b.textContent = '诊断中…';
     post({ action: 'transport' });
   });
+  $('#btn-egress').addEventListener('click', function () { post({ action: 'confirm-egress' }); });
   $('#btn-open').addEventListener('click', function () { post({ action: 'opentower' }); });
   $('#btn-tower').addEventListener('click', function () { post({ action: 'opentower' }); });
   $('#btn-drift').addEventListener('click', function () { post({ action: 'opentower' }); });

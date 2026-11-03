@@ -231,8 +231,11 @@ function rowHtml(it) {
   const advice = it.advice ? `<div class="advice"><b>建议</b> · ${esc(it.advice)}</div>` : '';
   const manual = it.fix && it.fix.kind === 'manual';
   const fixable = it.fix && it.fix.kind !== 'manual';
-  // 需要在浏览器里跑一段才能测的项目（目前只有浏览器侧 WebRTC）
-  const probe = it.probe ? `<button class="btn sm" data-probe="${esc(it.probe)}">在本机浏览器里实测</button>` : '';
+  // 需要在浏览器里跑一段、或者要管理员授权才能读的项目
+  const PROBE_LABEL = { webrtc: '在本机浏览器里实测', location: '授权读取（需管理员）' };
+  const probe = it.probe
+    ? `<button class="btn sm" data-probe="${esc(it.probe)}">${PROBE_LABEL[it.probe] || '实测'}</button>`
+    : '';
   const actions = (fixable || manual || probe)
     ? `<div class="row-actions">
         ${fixable ? `<button class="btn sm" data-fix="${esc(it.id)}">${(it.tags || []).includes('privacy') ? '预览关闭方案' : '加入清理清单'}</button>` : ''}
@@ -496,6 +499,11 @@ const PROBE_ICE = [
   { urls: 'stun:stun.nextcloud.com:443' },
 ];
 
+// Safari 某些版本在极端配置下会抛，取不到就当空对象，别让一次探测整体失败。
+function intlOptions() {
+  try { return new Intl.DateTimeFormat().resolvedOptions() || {}; } catch (e) { return {}; }
+}
+
 async function runWebrtcProbe() {
   if (!window.RTCPeerConnection) { toast('这个浏览器不支持 WebRTC'); return; }
   toast('正在收集 ICE 候选，大约 6 秒…', 6500);
@@ -527,7 +535,15 @@ async function runWebrtcProbe() {
   try {
     const d = await api('/api/probe/webrtc', {
       method: 'POST',
-      body: { candidates: cands, ua: navigator.userAgent },
+      body: {
+        candidates: cands,
+        ua: navigator.userAgent,
+        // 浏览器自己的语言/时区/区域格式。系统设置改成英文并不会连带改掉
+        // Chrome 的语言列表，这一层只有浏览器能回答，顺路一起回传。
+        languages: navigator.languages || [navigator.language],
+        timeZone: intlOptions().timeZone || '',
+        intlLocale: intlOptions().locale || '',
+      },
     });
     toast((d.verdict && d.verdict.title) || '实测完成', 4000);
     // 结论变了要重算分数与关卡，所以这里必须真的重扫一次
@@ -537,12 +553,37 @@ async function runWebrtcProbe() {
   }
 }
 
-/* ============================================================ 事件 */
+// 定位服务开关只有 root 能读（/var/db/locationd 是 _locationd 的目录）。
+// 所以不能放进常规扫描：那等于每次体检都弹一次管理员密码框。改成用户点一次、
+// 读一次、缓存起来，之后扫描只读缓存。
+let locationState = null;
 
+async function runLocationProbe(btn) {
+  if (btn) btn.disabled = true;
+  toast('正在读取定位服务开关，可能会弹出管理员授权…', 12000);
+  try {
+    if (!locationState) locationState = await api('/api/location');
+    const d = await api('/api/probe/location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': locationState.token },
+      body: { confirm: true },
+    });
+    toast(d.message || '已读取', 6000);
+    if (window.Tower) await Tower.reload(true);
+  } catch (e) {
+    toast(e.message, 8000);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ============================================================ 事件 */
 document.addEventListener('click', (e) => {
   const probeBtn = e.target.closest('[data-probe]');
   if (probeBtn) {
-    runWebrtcProbe();
+    // 两种探测：浏览器自己跑（ICE + 指纹），或读定位服务开关（要管理员授权）。
+    if (probeBtn.dataset.probe === 'location') runLocationProbe(probeBtn);
+    else runWebrtcProbe();
     e.stopPropagation();
     return;
   }
@@ -1000,6 +1041,119 @@ $('#region-confirm').addEventListener('click', async () => {
   }
 });
 
+/* ---- 终端代理变量：写进登录 shell 的启动文件 ---- */
+let shellproxyState = null;
+let shellproxyBusy = false;
+
+function shellproxyPort() {
+  const raw = ($('#shellproxy-port').value || '').trim();
+  return /^\d{1,5}$/.test(raw) ? Number(raw) : 0;
+}
+
+async function refreshShellproxy() {
+  if (shellproxyBusy) return;
+  try {
+    shellproxyState = await api('/api/shellproxy');
+    const s = shellproxyState;
+    $('#shellproxy-badge').className = 'badge' + (s.applied ? ' pass'
+      : !s.supported || s.error ? ''
+      : (s.foreign || []).length ? ' medium' : '');
+    $('#shellproxy-badge').textContent = !s.supported ? '不适用'
+      : s.error ? '读不到'
+      : s.applied ? `已写入 :${s.port}`
+      : (s.foreign || []).length ? '已有代理变量'
+      : '未写入';
+    const line = [];
+    if (s.error) line.push(s.error);
+    else {
+      line.push(`启动文件：${s.file}（${s.exists ? '存在' : '还不存在，写入时会新建'}）`);
+      if (s.applied) line.push(`本工具写入的端口是 ${s.port}，可随时撤销。`);
+      else if ((s.foreign || []).length) {
+        line.push(`第 ${s.foreign.slice(0, 4).join('、')} 行已经有代理变量，本工具不代写——`
+          + '两块配置会互相覆盖，请先自己处理。');
+      } else line.push('没有被本工具改过。');
+      const ports = (s.candidates || []).map((c) => `${c.port}（${c.from}）`);
+      if (ports.length) line.push(`检测到的本地端口：${ports.join('、')}。`);
+    }
+    $('#shellproxy-status').textContent = line.join(' ');
+    $('#shellproxy-apply').disabled = !s.supported || !!s.error || s.applied
+      || (s.foreign || []).length > 0;
+    $('#shellproxy-undo').disabled = !s.canUndo;
+    // 端口输入框没填时，用检测到的第一个候选当占位提示
+    const first = (s.candidates || [])[0];
+    if (first) $('#shellproxy-port').placeholder = `例如 ${first.port}`;
+  } catch (e) {
+    $('#shellproxy-badge').className = 'badge';
+    $('#shellproxy-badge').textContent = '读取失败';
+    $('#shellproxy-status').textContent = e.message;
+    $('#shellproxy-apply').disabled = true;
+    $('#shellproxy-undo').disabled = true;
+  }
+}
+
+async function previewShellproxy() {
+  if (!shellproxyState || shellproxyBusy) return;
+  const port = shellproxyPort();
+  if (!port) return toast('请填写本地代理端口，例如 7890');
+  try {
+    const p = await api('/api/shellproxy', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': shellproxyState.token },
+      body: { action: 'plan', port } });
+    $('#shellproxy-preview-text').textContent =
+      `将把下面这个块追加到 ${p.file} 末尾（端口 ${port}）。`
+      + '写入前会先用这个端口发一次请求，测不通就不写；'
+      + '原文件会备份到 ~/.ccclean/backups/，撤销只删这个块。';
+    $('#shellproxy-block').textContent = p.block;
+    $('#shellproxy-confirm').textContent = `确认写入 ${port}`;
+    $('#shellproxy-confirm').disabled = false;
+    $('#shellproxy-preview').hidden = false;
+  } catch (e) { toast(e.message, 8000); }
+}
+
+$('#shellproxy-apply').addEventListener('click', previewShellproxy);
+$('#shellproxy-cancel').addEventListener('click', () => {
+  $('#shellproxy-preview').hidden = true;
+});
+$('#shellproxy-port').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#shellproxy-apply').click();
+});
+$('#shellproxy-confirm').addEventListener('click', async () => {
+  if (!shellproxyState || shellproxyBusy) return;
+  const port = shellproxyPort();
+  shellproxyBusy = true;
+  ['shellproxy-apply', 'shellproxy-undo', 'shellproxy-confirm', 'shellproxy-cancel'].forEach((id) => {
+    $('#' + id).disabled = true;
+  });
+  try {
+    const res = await api('/api/shellproxy', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': shellproxyState.token },
+      body: { action: 'apply', port, confirm: true } });
+    toast(res.message || '已写入。', 9000);
+  } catch (e) { toast(e.message, 9000); }
+  finally {
+    shellproxyBusy = false;
+    $('#shellproxy-preview').hidden = true;
+    $('#shellproxy-confirm').disabled = false;
+    $('#shellproxy-cancel').disabled = false;
+    await refreshShellproxy();
+  }
+});
+$('#shellproxy-undo').addEventListener('click', async () => {
+  if (!shellproxyState || shellproxyBusy) return;
+  shellproxyBusy = true;
+  $('#shellproxy-undo').disabled = true;
+  try {
+    const res = await api('/api/shellproxy', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': shellproxyState.token },
+      body: { action: 'undo', confirm: true } });
+    toast(res.message || '已撤销。', 9000);
+  } catch (e) { toast(e.message, 9000); }
+  finally {
+    shellproxyBusy = false;
+    await refreshShellproxy();
+  }
+});
+
 /* ---- IPv6 出口：系统级关闭 / 恢复 ---- */
 let ipv6State = null;
 let ipv6Action = null;
@@ -1119,9 +1273,49 @@ $('#ipv6-confirm').addEventListener('click', async () => {
 
 /* ---- 分流规则：FlClash 全局附加规则写入 / 撤销 ---- */
 let proxyfixState = null;
+let proxyfixDns = null;
 let proxyfixAction = null;
 let proxyfixBusy = false;
 let proxyfixPortMode = 'proxy';
+
+const PROVIDER_LABELS = {
+  cloudflare: 'Cloudflare', google: 'Google', quad9: 'Quad9', opendns: 'OpenDNS',
+  adguard: 'AdGuard', nextdns: 'NextDNS', controld: 'Control D', mullvad: 'Mullvad',
+  alidns: '阿里 DNS', dnspod: 'DNSPod', other: '未识别',
+};
+const providerLabel = (k) => PROVIDER_LABELS[k] || k;
+
+async function refreshProxyfixDns() {
+  const el = $('#proxyfix-dns-status');
+  if (!el) return;
+  try {
+    proxyfixDns = await api('/api/proxyfix?dns=1');
+    const d = proxyfixDns;
+    if (!d.supported) {
+      el.textContent = d.reason || '仅 macOS。';
+      $('#proxyfix-dns-apply').disabled = true;
+      $('#proxyfix-dns-undo').disabled = true;
+      return;
+    }
+    const cur = (d.nameservers || []).join('、') || '（空）';
+    const line = [`当前：${cur}。`];
+    if (d.mixed) {
+      line.push(`混用了 ${d.families.length} 家（${d.families.map(providerLabel).join('、')}），`
+        + `DNS 出口会在它们之间跳；可以统一到 ${d.familyLabel}。`);
+    } else if (d.message) {
+      line.push(d.message);
+    }
+    if (d.reason) line.push(d.reason + '。');
+    if (d.applied) line.push('本工具改过，可恢复原样。');
+    el.textContent = line.join(' ');
+    $('#proxyfix-dns-apply').disabled = !d.canApply;
+    $('#proxyfix-dns-undo').disabled = !d.canUndo;
+  } catch (e) {
+    el.textContent = e.message;
+    $('#proxyfix-dns-apply').disabled = true;
+    $('#proxyfix-dns-undo').disabled = true;
+  }
+}
 
 async function refreshProxyfix() {
   if (proxyfixBusy) return;
@@ -1172,6 +1366,9 @@ async function refreshProxyfix() {
     $('#proxyfix-apply').disabled = true;
     $('#proxyfix-undo').disabled = true;
   }
+  // DNS 那一块单独取：它读的是客户端设置，和分流规则状态互不影响，
+  // 一边读失败不该把另一边也弄成不可用。
+  refreshProxyfixDns();
 }
 
 $('#proxyfix-port').addEventListener('change', () => {
@@ -1212,18 +1409,46 @@ function previewProxyfix(action) {
 
 $('#proxyfix-apply').addEventListener('click', () => previewProxyfix('apply'));
 $('#proxyfix-undo').addEventListener('click', () => previewProxyfix('undo'));
+
+function previewProxyfixDns(action) {
+  if (!proxyfixDns || proxyfixBusy) return;
+  proxyfixAction = action;
+  const d = proxyfixDns;
+  if (action === 'dns') {
+    $('#proxyfix-preview-text').textContent =
+      `将把 FlClash 的 DNS 解析器统一到 ${d.familyLabel}，删掉其它家；` +
+      '协议形式和 `#代理组` 后缀都不动，nameserver-policy 与 fallback 也不动。' +
+      '写入前会退出并重开 FlClash，代理中断几秒。';
+    $('#proxyfix-rules').textContent = (d.next || []).join('\n');
+    $('#proxyfix-confirm').textContent = '确认写入并重启 FlClash';
+  } else {
+    const back = (d.savedNameservers || []).join('\n');
+    $('#proxyfix-preview-text').textContent =
+      '将把 nameserver 恢复成本工具改动之前的样子，同样会退出并重开 FlClash。';
+    $('#proxyfix-rules').textContent = back || '（记录里没有原名单）';
+    $('#proxyfix-confirm').textContent = '确认恢复并重启 FlClash';
+  }
+  $('#proxyfix-confirm').disabled = false;
+  $('#proxyfix-preview').hidden = false;
+}
+
+$('#proxyfix-dns-apply').addEventListener('click', () => previewProxyfixDns('dns'));
+$('#proxyfix-dns-undo').addEventListener('click', () => previewProxyfixDns('dns-undo'));
 $('#proxyfix-cancel').addEventListener('click', () => { $('#proxyfix-preview').hidden = true; proxyfixAction = null; });
 $('#proxyfix-confirm').addEventListener('click', async () => {
-  if (!proxyfixState || !proxyfixAction || proxyfixBusy) return;
+  const dnsAction = proxyfixAction === 'dns' || proxyfixAction === 'dns-undo';
+  const src = dnsAction ? proxyfixDns : proxyfixState;
+  if (!src || !proxyfixAction || proxyfixBusy) return;
   proxyfixBusy = true;
-  ['proxyfix-apply', 'proxyfix-undo', 'proxyfix-confirm', 'proxyfix-cancel'].forEach((id) => { $('#' + id).disabled = true; });
+  ['proxyfix-apply', 'proxyfix-undo', 'proxyfix-dns-apply', 'proxyfix-dns-undo',
+    'proxyfix-confirm', 'proxyfix-cancel'].forEach((id) => { $('#' + id).disabled = true; });
   $('#proxyfix-status').textContent =
-    `正在退出并重开 ${proxyfixState.client || '代理客户端'}，请稍候…`;
+    `正在退出并重开 ${src.client || '代理客户端'}，请稍候…`;
   try {
     const res = await api('/api/proxyfix', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': proxyfixState.token },
+      headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': src.token },
       body: { action: proxyfixAction, confirm: true, portMode: proxyfixPortMode } });
-    toast(res.message || '分流规则已更新。', 8000);
+    toast(res.message || '已更新。', 8000);
   } catch (e) { toast(e.message, 8000); }
   finally {
     proxyfixBusy = false;
@@ -1782,7 +2007,7 @@ function switchTab(name) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + name));
   if (history.replaceState) history.replaceState(null, '', '#' + name);
   window.scrollTo({ top: 0, behavior: 'smooth' });
-  if (name === 'privacy') { refreshPrivacy(); refreshNetcfg(); refreshAlign(); refreshRegion(); refreshIPv6(); refreshProxyfix(); loadUninstall(); refreshUpdate(); }
+  if (name === 'privacy') { refreshPrivacy(); refreshNetcfg(); refreshAlign(); refreshRegion(); refreshShellproxy(); refreshIPv6(); refreshProxyfix(); loadUninstall(); refreshUpdate(); }
   if (name === 'isolation') loadProfiles();
   if (name === 'findings') { loadEgress(); loadBackups(); loadTz(); }
   if (name === 'tower' && window.Tower) Tower.refresh();

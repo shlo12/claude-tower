@@ -48,6 +48,21 @@ def _get(url: str, timeout: float = 10.0) -> dict | None:
         return None
 
 
+def lookup(ip: str) -> dict | None:
+    """任意地址的归属，走和出口检测同一个接口。失败返回 None。
+
+    只用于解析器地址这类第三方地址：接口收到的不是本机 IP。
+    """
+    raw = _get(f"{BASE}/api/iprisk/{ip}", timeout=5.0)
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "country": (raw.get("countryCode") or "").upper(),
+        "org": raw.get("company_name") or raw.get("asOrganization") or "",
+        "asn": raw.get("asn"),
+    }
+
+
 def check(force: bool = False) -> dict:
     """查询当前出口 IP 的纯净度；失败时 available=False。"""
     now = time.time()

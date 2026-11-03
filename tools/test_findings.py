@@ -443,6 +443,45 @@ class HardwareFingerprintTests(unittest.TestCase):
         for name in ("simsun", "simhei", "msyh", "wqy", "fangsong"):
             self.assertIn(name, scanner._REGION_FONTS)
 
+    def test_vendor_font_is_high(self):
+        """国产厂商字体比办公字体硬：小米/华为/OPPO 自带，美区机器不会有。"""
+        out = self.with_fonts(["MiSans-Regular.ttf"])
+        self.assertEqual(out["id"], "fp.fonts")
+        self.assertEqual(out["severity"], "high")
+        self.assertIn("国产厂商字体", out["title"])
+        self.assertIn("国产厂商字体", [e["label"] for e in out["evidence"]])
+
+    def test_office_and_vendor_are_reported_separately(self):
+        out = self.with_fonts(["simsun.ttc", "HarmonyOS_Sans_SC.ttf"])
+        self.assertEqual(out["severity"], "high")
+        labels = {e["label"]: e["value"] for e in out["evidence"]}
+        self.assertIn("HarmonyOS_Sans_SC.ttf", labels["国产厂商字体"])
+        self.assertIn("simsun.ttc", labels["中文办公字体"])
+
+    def test_vendor_list_covers_the_big_five(self):
+        for name in ("misans", "harmonyos", "oppo sans", "vivo sans", "puhuiti"):
+            self.assertTrue(scanner._is_vendor_font(name + ".ttf"), name)
+
+    def test_vendor_matcher_ignores_ordinary_fonts(self):
+        for name in ("PingFang.ttc", "Helvetica.ttc", "SFNS.ttf"):
+            self.assertFalse(scanner._is_vendor_font(name), name)
+
+    def test_new_checks_are_wired_into_level_2_1(self):
+        src = (Path(__file__).resolve().parent.parent / "core/tower.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def _probe_identity"):]
+        body = body[:body.index("\ndef ")]
+        for iid in ("fp.fonts", "fp.gpu", "fp.vm"):
+            self.assertIn(f'"{iid}"', body, f"{iid} 产出了但关卡没接")
+
+    def test_browser_ua_is_wired_into_the_language_card(self):
+        src = (Path(__file__).resolve().parent.parent / "core/tower.py").read_text(
+            encoding="utf-8")
+        body = src[src.index("def _probe_lang"):]
+        body = body[:body.index("\ndef ")]
+        self.assertIn('"fp.cn_browser"', body)
+
+
     def gpu_with(self, chip):
         orig = scanner._run
         scanner._run = lambda cmd, timeout=6.0: (
@@ -503,13 +542,36 @@ class HardwareFingerprintTests(unittest.TestCase):
         for fn in (scanner._check_fonts, scanner._check_gpu, scanner._check_vm):
             self.assertEqual(fn()["severity"], "info", fn.__name__)
 
-    def test_new_checks_are_wired_into_level_2_1(self):
-        src = (Path(__file__).resolve().parent.parent / "core/tower.py").read_text(
-            encoding="utf-8")
-        body = src[src.index("def _probe_identity"):]
-        body = body[:body.index("\ndef ")]
-        for iid in ("fp.fonts", "fp.gpu", "fp.vm"):
-            self.assertIn(f'"{iid}"', body, f"{iid} 产出了但关卡没接")
+
+class TimezoneTierTests(unittest.TestCase):
+    """时区分档：直接触发 / 受限地区 / 支持地区，三档不能混。"""
+
+    def tz_item(self, tz):
+        orig = scanner.compat.timezone_name
+        scanner.compat.timezone_name = lambda: tz
+        try:
+            items = scanner.check_locale({})
+        finally:
+            scanner.compat.timezone_name = orig
+        return next(i for i in items if i["id"] == "locale.tz")
+
+    def test_mainland_is_critical(self):
+        self.assertEqual(self.tz_item("Asia/Shanghai")["severity"], "critical")
+
+    def test_hong_kong_and_macau_keep_partial_risk(self):
+        for tz in ("Asia/Hong_Kong", "Asia/Macau"):
+            self.assertEqual(self.tz_item(tz)["severity"], "medium", tz)
+
+    def test_taiwan_is_info_not_medium(self):
+        # 中国台湾在支持地区清单内，单独用不扣分；混成 medium 会让人去改真资料。
+        item = self.tz_item("Asia/Taipei")
+        self.assertEqual(item["severity"], "info")
+        self.assertNotIn("Asia/Taipei", "".join(
+            e["value"] for e in item["evidence"] if e["label"] != "时区"))
+
+    def test_taipei_is_not_in_the_greater_china_set(self):
+        self.assertNotIn("Asia/Taipei", scanner.rules.GREATER_CHINA_TZ)
+        self.assertIn("Asia/Taipei", scanner.rules.SUPPORTED_TZ)
 
 
 class CliInstallTests(unittest.TestCase):

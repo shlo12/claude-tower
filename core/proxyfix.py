@@ -29,10 +29,13 @@ import threading
 import time
 from pathlib import Path
 
-from . import compat, kernelcheck, shield as shield_state
+from . import compat, kernelcheck, proxydns, shield as shield_state
 
 HOME = Path.home()
 STATE = HOME / ".ccclean/proxyfix.json"
+# DNS 解析器统一是独立的一件事：它改的是客户端设置（不是分流规则），
+# 撤销记录也分开存，免得撤销规则时把 DNS 一起带回去。
+STATE_DNS = HOME / ".ccclean/proxydns-fix.json"
 LOCK = threading.Lock()
 
 FLCLASH_DIR = HOME / "Library/Application Support/com.follow.clash"
@@ -684,8 +687,9 @@ def _order_keys(n, below):
 
 
 def _state_guard():
-    if STATE.is_symlink() or STATE.parent.is_symlink():
-        raise ValueError("状态路径是符号链接，未修改")
+    for path in (STATE, STATE_DNS):
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("状态路径是符号链接，未修改")
 
 
 def _read_state():
@@ -1138,6 +1142,365 @@ def status(port_mode=""):
         return _status_clashx(target, saved, state_error)
     return _status_unavailable(saved, state_error, "暂不支持自动改写这个客户端", target)
 
+
+
+# ---------------------------------------------------------------- DNS 解析器
+
+# nameserver 里挂两家，内核会并行发查询、谁先回用谁，「DNS 出口」就随查询
+# 在两家之间跳：同一份配置，这次由 Cloudflare 解析、下次换成 Google，探针上
+# 的国家跟着变。这里把它统一到一家——只删多余的那家，不动协议形式、不动
+# `#<代理组>` 后缀，也不碰 nameserver-policy / fallback。
+#
+# 设置存在 plist 的 `flutter.config` 这个 JSON 字符串里（不是 profile 的
+# `dns:` 段：nameserver 在 dns-override-keys 里，profile 写的会被补丁覆盖）。
+# 必须走 `defaults` 而不是直接改 plist 文件，否则 cfprefsd 缓存会让读到的
+# 还是旧值；也必须先退出客户端，否则它退出时会把内存里的旧值刷回磁盘。
+FLCLASH_DOMAIN = "com.follow.clash"
+FLCLASH_PREFS = "flutter.config"
+
+# 同一家的另一个 anycast 地址：换过去仍落在同一片网络、同一个 PoP，只是
+# 多一个可用入口，不会把出口带出这个城市。只留一家之后如果只剩一个地址，
+# 补上它——单点挂了是整机断网。
+_SIBLINGS = {
+    "1.1.1.1": "1.0.0.1",
+    "1.0.0.1": "1.1.1.1",
+    "8.8.8.8": "8.8.4.4",
+    "8.8.4.4": "8.8.8.8",
+    "9.9.9.9": "149.112.112.112",
+    "149.112.112.112": "9.9.9.9",
+}
+
+# 优先留哪一家。Cloudflare 在入口 PoP 就地解析，DNS 归属跟着出口走；
+# Google 的递归出口由它自己的骨干网决定，出口在美东时可能报在蒙特利尔。
+_DNS_PREFER = ("cloudflare", "quad9", "google")
+
+
+def _swap_host(raw, host):
+    """换掉地址里的主机，保留协议、端口和 `#<代理组>` 后缀。"""
+    text = (raw or "").strip().strip("\"'")
+    m = re.match(r"^([a-z][a-z0-9+.-]*://)([^/#?]+)(.*)$", text, re.I)
+    if m:
+        scheme, authority, rest = m.groups()
+        _, sep, port = authority.partition(":")
+        return scheme + host + (sep + port if sep else "") + rest
+    head, sep, tail = text.partition("#")
+    return host + sep + tail
+
+
+def _dns_families(servers):
+    """按服务商分组，保持出现顺序。`system` 和认不出的不进组。"""
+    out: list[tuple[str, list[str]]] = []
+    for raw in servers:
+        name = proxydns.provider(raw)
+        if not name or name == "system":
+            continue
+        for entry in out:
+            if entry[0] == name:
+                entry[1].append(raw)
+                break
+        else:
+            out.append((name, [raw]))
+    return out
+
+
+def _dns_plan(servers):
+    """算出「只留一家」之后该写成什么。纯函数，不碰磁盘。"""
+    families = _dns_families(servers)
+    names = [name for name, _ in families]
+    plan = {
+        "mixed": len(families) >= 2,
+        "families": names,
+        "family": "",
+        "familyLabel": "",
+        "keep": [],
+        "drop": [],
+        "next": list(servers),
+        "added": [],
+    }
+    if not plan["mixed"]:
+        return plan
+    chosen = next((n for n in _DNS_PREFER if n in names), names[0])
+    keep = dict(families)[chosen]
+    drop = [raw for name, items in families if name != chosen for raw in items]
+    plan["family"] = chosen
+    plan["familyLabel"] = proxydns.provider_label(chosen)
+    plan["keep"] = list(keep)
+    plan["drop"] = drop
+
+    added: list[str] = []
+    if len(keep) == 1:
+        sibling = _SIBLINGS.get(proxydns.label(keep[0]))
+        if sibling and not any(proxydns.label(v) == sibling for v in servers):
+            added.append(_swap_host(keep[0], sibling))
+
+    dropped = set(drop)
+    nxt: list[str] = []
+    for raw in servers:
+        if raw in dropped:
+            continue
+        nxt.append(raw)
+        if added and raw == keep[0]:
+            nxt.extend(added)
+    plan["added"] = added
+    plan["next"] = nxt
+    return plan
+
+
+def _flclash_settings():
+    r = _run(["/usr/bin/defaults", "read", FLCLASH_DOMAIN, FLCLASH_PREFS], 10)
+    if not r or r.returncode != 0:
+        return None, "读不到 FlClash 的设置（defaults read 失败）"
+    try:
+        cfg = json.loads(r.stdout)
+    except ValueError:
+        return None, "FlClash 的设置不是合法 JSON，未修改"
+    if not isinstance(cfg, dict):
+        return None, "FlClash 的设置格式不认识，未修改"
+    return cfg, ""
+
+
+def _dns_block(cfg):
+    patch = cfg.get("patchClashConfig")
+    dns = patch.get("dns") if isinstance(patch, dict) else None
+    return dns if isinstance(dns, dict) else None
+
+
+def _flclash_nameservers(cfg):
+    """当前的 nameserver 名单；读不到返回 None（和「空名单」区分开）。"""
+    dns = _dns_block(cfg)
+    if dns is None:
+        return None
+    servers = dns.get("nameserver")
+    if not isinstance(servers, list):
+        return None
+    return [v for v in servers if isinstance(v, str) and v.strip()]
+
+
+def _write_settings(cfg):
+    raw = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+    r = _run(["/usr/bin/defaults", "write", FLCLASH_DOMAIN, FLCLASH_PREFS,
+              "-string", raw], 15)
+    return bool(r and r.returncode == 0)
+
+
+def _read_dns_state():
+    try:
+        data = json.loads(STATE_DNS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, ""
+    except (OSError, ValueError) as exc:
+        return None, f"DNS 修复记录无法读取：{exc}"
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None, "DNS 修复记录格式不正确"
+    if not isinstance(data.get("before"), list) or not isinstance(data.get("after"), list):
+        return None, "DNS 修复记录格式不正确"
+    return data, ""
+
+
+def _write_dns_state(data):
+    parent = STATE_DNS.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=".proxydns-state-", dir=str(parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(name, STATE_DNS)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _clear_dns_state():
+    try:
+        STATE_DNS.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _wait_dns(wanted, dropped, timeout=15):
+    """等客户端重新生成配置，确认只剩想留的那家。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = FLCLASH_CONFIG.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if text and all(v in text for v in wanted) \
+                and not any(v in text for v in dropped):
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def dns_status():
+    """只读：当前解析器名单、混了哪几家、能改成什么。"""
+    base = {
+        "supported": compat.IS_MAC,
+        "client": "FlClash",
+        "running": False,
+        "nameservers": [],
+        "families": [],
+        "mixed": False,
+        "family": "",
+        "familyLabel": "",
+        "keep": [],
+        "drop": [],
+        "next": [],
+        "canApply": False,
+        "canUndo": False,
+        "applied": False,
+        "savedNameservers": [],
+        "reason": "",
+        "message": "",
+    }
+    if not base["supported"]:
+        base["reason"] = "此功能仅支持 macOS"
+        return base
+    saved, error = _read_dns_state()
+    base["canUndo"] = bool(saved)
+    base["applied"] = bool(saved)
+    base["savedNameservers"] = list((saved or {}).get("before") or [])
+    if error:
+        base["reason"] = error
+        return base
+    cfg, error = _flclash_settings()
+    if error:
+        base["reason"] = error
+        return base
+    base["running"] = _proc_alive(FLCLASH_PROC)
+    servers = _flclash_nameservers(cfg)
+    if servers is None:
+        base["reason"] = "FlClash 的设置里没有 nameserver 名单，未修改"
+        return base
+    plan = _dns_plan(servers)
+    base.update({k: plan[k] for k in
+                 ("families", "mixed", "family", "familyLabel",
+                  "keep", "drop", "next")})
+    base["nameservers"] = servers
+    if not servers:
+        base["reason"] = "FlClash 的 nameserver 是空的，没有可统一的名单"
+    elif plan["mixed"]:
+        base["canApply"] = True
+    else:
+        base["message"] = "解析器已经只走一家，不需要改。"
+    return base
+
+
+def _apply_dns():
+    current = dns_status()
+    if current["reason"]:
+        raise ValueError(current["reason"])
+    if not current["mixed"]:
+        return {**current, "message": current["message"] or "解析器已经只走一家，没有修改。"}
+
+    was_running = current["running"]
+    if not _quit():
+        raise RuntimeError("FlClash 没有退出；请手动退出后再修复。设置未修改。")
+
+    plan = {"mixed": False, "familyLabel": "", "next": [], "drop": [], "added": []}
+    try:
+        # 退出后重读：它退出时会把内存里的值刷回磁盘，之前读到的是旧值。
+        cfg, error = _flclash_settings()
+        if error:
+            raise ValueError(error)
+        before = _flclash_nameservers(cfg)
+        if before is None:
+            raise ValueError("FlClash 的设置里没有 nameserver 名单，未修改")
+        plan = _dns_plan(before)
+        if plan["mixed"]:
+            dns = _dns_block(cfg)
+            dns["nameserver"] = plan["next"]
+            if not _write_settings(cfg):
+                raise RuntimeError("写入 FlClash 设置失败，未修改")
+            back, error = _flclash_settings()
+            if error or _flclash_nameservers(back or {}) != plan["next"]:
+                dns["nameserver"] = before
+                _write_settings(cfg)
+                raise RuntimeError("写入后回读不一致，已改回原样")
+            try:
+                _write_dns_state({
+                    "version": 1,
+                    "createdAt": time.time(),
+                    "client": "flclash",
+                    "before": before,
+                    "after": plan["next"],
+                })
+            except Exception:
+                # 设置已经改了却没记下「原来是什么」，等于再也撤不回来。
+                # 宁可改回原样再报错。
+                dns["nameserver"] = before
+                _write_settings(cfg)
+                raise
+    except Exception:
+        if was_running:
+            _launch()
+        raise
+
+    started = _launch() if was_running else False
+    verified = None
+    if plan["mixed"]:
+        verified = _wait_dns(plan["next"], plan["drop"]) if started else None
+    result = dns_status()
+    added = "，并补上同家的另一个地址" if plan.get("added") else ""
+    if not plan["mixed"]:
+        result["message"] = "退出后重读，解析器已经只走一家，没有修改。"
+        result["verified"] = True
+    elif not was_running:
+        result["message"] = (f"已把 DNS 解析器统一到 {plan['familyLabel']}{added}；"
+                             "FlClash 当时没在运行，下次启动时生效。")
+        result["verified"] = None
+    elif not started:
+        result["message"] = "设置已写入，但 FlClash 没有重新启动；请手动打开后重新扫描。"
+        result["verified"] = False
+    elif not verified:
+        result["message"] = ("设置已写入，但没在重新生成的配置里看到；"
+                             "FlClash 可能没有重新加载，可恢复后重试。")
+        result["verified"] = False
+    else:
+        result["message"] = (f"已把 DNS 解析器统一到 {plan['familyLabel']}{added}，"
+                             f"并重启 FlClash；运行配置里只剩这一家。")
+        result["verified"] = True
+    return result
+
+
+def _undo_dns():
+    saved, error = _read_dns_state()
+    if error:
+        raise ValueError(error)
+    if not saved:
+        raise ValueError("没有本工具留下的 DNS 修复记录")
+    before = saved.get("before") or []
+    was_running = _proc_alive(FLCLASH_PROC)
+    if not _quit():
+        raise RuntimeError("FlClash 没有退出；请手动退出后再恢复。设置未修改。")
+
+    try:
+        cfg, error = _flclash_settings()
+        if error:
+            raise ValueError(error)
+        dns = _dns_block(cfg)
+        if dns is None:
+            raise ValueError("FlClash 的设置里没有 DNS 段，未修改")
+        dns["nameserver"] = list(before)
+        if not _write_settings(cfg):
+            raise RuntimeError("写回原解析器失败，未修改")
+        back, error = _flclash_settings()
+        if error or _flclash_nameservers(back or {}) != list(before):
+            raise RuntimeError("写回后回读不一致，请手动检查 FlClash 的 DNS 设置")
+        _clear_dns_state()
+    except Exception:
+        if was_running:
+            _launch()
+        raise
+
+    started = _launch() if was_running else False
+    result = dns_status()
+    result["message"] = ("已恢复原来的解析器名单" if started
+                         else "已恢复原来的解析器名单；FlClash 当时没在运行，下次启动时生效。")
+    result["verified"] = _wait_dns(list(before), []) if started else None
+    return result
 
 
 # ---------------------------------------------------------------- 应用 / 撤销
@@ -1839,6 +2202,10 @@ def apply(action, port_mode="proxy"):
                 return _apply(mode)
             if action == "undo":
                 return _undo()
+            if action == "dns":
+                return _apply_dns()
+            if action == "dns-undo":
+                return _undo_dns()
         except sqlite3.Error as exc:
             raise RuntimeError(f"FlClash 数据库操作失败：{exc}") from exc
         raise ValueError("未知操作")

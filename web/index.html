@@ -191,6 +191,29 @@
             </div>
           </div>
         </div>
+        <div class="card toolcard" id="shellproxy-card">
+          <div class="card-head"><h3>终端代理变量</h3><span class="badge" id="shellproxy-badge">读取中</span></div>
+          <p class="tool-desc"><code>curl</code> 不读 macOS 的系统代理。浏览器走了代理、终端里还从真实地址出去，是「网页全绿、CLI 裸奔」最常见的原因——从终端启动的 Claude Code 继承的就是这条直连路径。</p>
+          <p class="tool-desc">这里把 <code>http_proxy</code> / <code>https_proxy</code> 写进登录 shell 的启动文件，只写一个带标记的块，撤销时按标记删、块外的内容一个字都不动。写入前会先拿这个端口发一次请求，确认它真的能出去；副本保存在 <code>~/.ccclean/backups/</code>（0600），过滤已识别密钥；无法安全脱敏时不留副本。</p>
+          <div class="field">
+            <label for="shellproxy-port">本地代理端口</label>
+            <input type="text" id="shellproxy-port" maxlength="5" placeholder="例如 7890" autocomplete="off" spellcheck="false">
+            <span class="help" id="shellproxy-hint">端口要先测通才会写入。</span>
+          </div>
+          <div class="tool-row">
+            <button class="btn sm" id="shellproxy-apply" disabled>预览并写入</button>
+            <button class="btn sm ghost" id="shellproxy-undo" disabled>撤销本工具写入</button>
+          </div>
+          <p class="tool-desc" id="shellproxy-status">读取终端代理配置…</p>
+          <div id="shellproxy-preview" hidden>
+            <p class="tool-desc" id="shellproxy-preview-text"></p>
+            <pre class="watch-log mono" id="shellproxy-block"></pre>
+            <div class="tool-row">
+              <button class="btn sm" id="shellproxy-confirm" disabled>确认写入</button>
+              <button class="btn sm ghost" id="shellproxy-cancel">取消</button>
+            </div>
+          </div>
+        </div>
         <div class="card toolcard" id="ipv6-card">
           <div class="card-head"><h3>IPv6 出口（Wi-Fi）</h3><span class="badge" id="ipv6-badge">检查中</span></div>
           <p class="tool-desc">代理通常只接管 IPv4。这台机器如果有全局 IPv6 地址和 v6 默认路由，客户端可能绕过代理、从真实 ISP 直连。原检测文章建议在系统层把 IPv6 配置为「关闭」，而不是只关代理。</p>
@@ -228,6 +251,15 @@
           </div>
           <p class="tool-desc" id="proxyfix-status">读取分流规则状态…</p>
           <pre class="watch-log mono" id="proxyfix-guidance" hidden></pre>
+          <div class="field">
+            <label>DNS 解析器（决定「解析出口」会不会在城市之间跳）</label>
+            <p class="tool-desc" id="proxyfix-dns-status">读取解析器状态…</p>
+            <div class="tool-row">
+              <button class="btn sm ghost" id="proxyfix-dns-apply" disabled>统一到一家解析器</button>
+              <button class="btn sm ghost" id="proxyfix-dns-undo" disabled>恢复原解析器</button>
+            </div>
+            <span class="help">nameserver 里挂两家时，内核并行发查询、谁先回用谁，探针上的「DNS 出口」就会在两家之间跳（Cloudflare 落在出口同城，Google 可能跨到邻国）。这里只删多余的那家，不动协议形式和 <code>#代理组</code> 后缀；只留一个地址时会补上同一家的另一个 anycast 地址。</span>
+          </div>
           <div id="proxyfix-preview" hidden>
             <p class="tool-desc" id="proxyfix-preview-text"></p>
             <pre class="watch-log mono" id="proxyfix-rules"></pre>

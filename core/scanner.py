@@ -12,8 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import (browserwebrtc, compat, doh, netcfg, netprobe, regioncfg,
-               retention, rules, shield, stun)
+from . import (browserwebrtc, compat, domainegress, doh, location, netcfg,
+               netprobe, regioncfg, retention, rules, shield, stun, uatraits)
 
 HOME = Path.home()
 CLAUDE_DIR = HOME / ".claude"
@@ -290,8 +290,22 @@ def check_fingerprint() -> list[dict]:
 # 每台 Mac 都有，不构成区分度。
 _REGION_FONTS = ("simsun", "simhei", "simkai", "simfang", "msyh", "msjh",
                  "dengxian", "wqy", "fzshu", "fzkai", "fzhei", "fangsong")
+
+# 国产手机厂商 / 国产软件自带的字体。和上面那批不是一个量级：
+# MiSans 是小米 HyperOS 自带、HarmonyOS Sans 是华为自带、OPPO Sans / vivo Sans
+# 同理，Alibaba PuHuiTi 随钉钉、Douyin Sans 随剪映。美区机器上几乎不会出现，
+# 命中一个就基本能确定这台机器来自中文区设备，所以单独判一档。
+_VENDOR_FONTS = ("misans", "miui", "harmonyos", "hihonor", "honor sans",
+                 "opposans", "oppo sans", "vivosans", "vivo sans",
+                 "puhuiti", "alibaba sans", "jinbuti", "douyin", "hyqihei",
+                 "hanyisans", "sourcehanserifcn")
 _VIRTUAL_GPU = ("virtual", "vmware", "parallels", "virtualbox", "swiftshader",
                 "llvmpipe", "qemu", "cirrus")
+
+
+def _is_vendor_font(name: str) -> bool:
+    low = name.lower().replace("-", "").replace("_", "").replace(" ", "")
+    return any(key.replace(" ", "") in low for key in _VENDOR_FONTS)
 
 
 def _font_hits(limit: int = 8) -> list[str]:
@@ -302,6 +316,7 @@ def _font_hits(limit: int = 8) -> list[str]:
     """
     hits: list[str] = []
     seen = 0
+    keys = _REGION_FONTS + _VENDOR_FONTS
     for base in (Path("/Library/Fonts"), HOME / "Library/Fonts"):
         if not base.is_dir():
             continue
@@ -313,7 +328,7 @@ def _font_hits(limit: int = 8) -> list[str]:
                 if path.suffix.lower() not in (".ttf", ".ttc", ".otf"):
                     continue
                 name = path.name.lower()
-                if any(key in name for key in _REGION_FONTS) and path.name not in hits:
+                if any(key in name for key in keys) and path.name not in hits:
                     hits.append(path.name)
                     if len(hits) >= limit:
                         return hits
@@ -328,6 +343,28 @@ def _check_fonts() -> dict:
                      "这一项读的是 macOS 的字体目录，其它系统跳过。")
     hits = _font_hits()
     if hits:
+        vendor = [h for h in hits if _is_vendor_font(h)]
+        office = [h for h in hits if h not in vendor]
+        ev = []
+        if vendor:
+            ev.append(_ev("国产厂商字体", "、".join(vendor), mono=True))
+        if office:
+            ev.append(_ev("中文办公字体", "、".join(office), mono=True))
+        if vendor:
+            return _item(
+                "fp.fonts", "fingerprint",
+                f"装了 {len(vendor)} 个国产厂商字体",
+                "high",
+                "MiSans 是小米 HyperOS 自带、HarmonyOS Sans 是华为自带，OPPO Sans / "
+                "vivo Sans 同理，Alibaba PuHuiTi 随钉钉、Douyin Sans 随剪映装进来。"
+                "这类字体美区机器上几乎不会出现，命中一个就基本能确定设备来自中文区——"
+                "它比「装没装微软雅黑」硬得多，微软雅黑可能只是装过一次 Office。"
+                "字体列表是浏览器和部分应用能读到的稳定特征。",
+                ev,
+                "换机或重装系统之前，在「字体册」里停用这些字体只能减少可见性，"
+                "文件名仍在磁盘上；要彻底消除特征需要卸载字体文件。"
+                "如果这台机器本来就在中文区使用，这一项不必强求。",
+            )
         return _item(
             "fp.fonts", "fingerprint",
             f"装了 {len(hits)} 个地区特征字体",
@@ -335,7 +372,7 @@ def _check_fonts() -> dict:
             "SimSun / 微软雅黑 / 文泉驿 / 方正这类字体通常随中文办公软件装进来，"
             "美区环境里很少见。字体列表是浏览器和部分应用能读到的稳定特征，"
             "装得越多，这台机器的地区画像越明显。",
-            [_ev("字体", "、".join(hits), mono=True)],
+            ev,
             "在「字体册」里停用不用的字体就够了，不必删除；只是停用也仍然算已安装，"
             "要彻底消除特征需要卸载。",
         )
@@ -976,13 +1013,26 @@ def check_locale(net_info: dict | None = None) -> list[dict]:
                 "locale",
                 f"系统时区为 {tz}（UTC+8 时区带）",
                 "medium",
-                "不在直接触发名单内。"
-                "需要说明的是：Asia/Taipei / Asia/Hong_Kong 属于 Anthropic 官方支持地区，"
-                "单独使用时并不构成风险；真正的扣分点是「时区与出口地理不一致」这层叠加信号。",
+                "不在直接触发名单内，但香港、澳门在 Anthropic 的受限地区清单里，"
+                "时区本身就会带一点权重。真正的扣分点还是「时区与出口地理不一致」这层叠加信号。",
                 [_ev("时区", tz, mono=True)],
-                "官方支持地区，此项为可选优化——保持原样也能正常使用。"
-                "只有当你希望「时区 / 语言 / 出口」三者完全自洽时，才建议改成出口所在城市；"
+                "如果出口不在同一地区，把时区改成出口所在城市；出口就在港澳时保持原样即可。"
                 "不要为了表面一致去改动真实资料。",
+            )
+        )
+    elif tz in rules.SUPPORTED_TZ:
+        # 中国台湾在支持地区清单内：单独用不构成风险。这里只报事实，
+        # 不降成 medium——把「支持地区」和「受限地区」混成一档会误导用户去改真资料。
+        items.append(
+            _item(
+                "locale.tz",
+                "locale",
+                f"系统时区为 {tz}",
+                "info",
+                "中国台湾在 Anthropic 的支持地区清单内，这个时区名本身不扣分。"
+                "只有「时区与出口地理对不上」时才会成为叠加信号——那一条由出口比对单独判。",
+                [_ev("时区", tz, mono=True)],
+                "不需要为这一项做任何改动。",
             )
         )
     else:
@@ -1087,6 +1137,8 @@ def check_locale(net_info: dict | None = None) -> list[dict]:
 
     items.append(_check_client_lang(sys_langs))
     items.append(_check_region_format(net_info or {}, sys_locale))
+    items.append(_check_browser_fingerprint(net_info or {}))
+    items.append(_check_browser_ua())
     return items
 
 
@@ -1151,6 +1203,131 @@ def _check_region_format(net_info: dict, raw_locale: str = "") -> dict:
         ev,
         "在「隐私设置 → 区域格式」里改成出口国家对应的格式，不需要管理员权限，"
         "重启浏览器后生效；本工具不会自动改，需要你自己确认。",
+    )
+
+
+# 出口在下面这些地方时，中文语言/中文格式属于「本来就一致」，不额外扣分。
+_GREATER_CHINA = ("CN", "HK", "TW", "MO")
+
+
+def _check_browser_fingerprint(net_info: dict) -> dict:
+    """浏览器自己交出去的语言、区域格式与时区。
+
+    和 `locale.region` 不重复：那一项读的是系统 AppleLocale，这一项读的是
+    浏览器实际报给网页的值。Chrome 有自己的界面语言，系统改成英文之后它照样
+    可能报 `zh-CN`——外部探针看的是后者，不是系统设置。
+
+    数据来自浏览器上一次实测（和 WebRTC 同一次 POST），所以没测过时只报
+    「还没实测」，不猜。
+    """
+    rec = browserwebrtc.load() or {}
+    browser = rec.get("browser") if isinstance(rec.get("browser"), dict) else {}
+    country = (net_info.get("country") or "").upper()
+    target = country or netcfg.expected_country()
+    sys_langs = _system_languages()
+    sys_tz = _system_timezone()
+    v = browserwebrtc.assess_fingerprint(browser, egress_country=target,
+                                         system_langs=sys_langs, system_tz=sys_tz)
+
+    ev: list[dict] = []
+    if v["languages"]:
+        ev.append(_ev("浏览器语言", " / ".join(v["languages"][:3]), mono=True))
+    if v["locale"]:
+        ev.append(_ev("Intl 区域格式", v["locale"], mono=True))
+    if v["timeZone"]:
+        ev.append(_ev("浏览器时区", v["timeZone"], mono=True))
+    if sys_langs:
+        ev.append(_ev("系统语言", " / ".join(sys_langs[:2]), mono=True))
+    if target:
+        ev.append(_ev("出口国家", target, mono=True))
+    if rec.get("at"):
+        ev.append(_ev("实测时间",
+                      time.strftime("%m-%d %H:%M", time.localtime(int(rec["at"]))),
+                      mono=True))
+
+    state = v["state"]
+    if state == "no-data":
+        return _item("locale.browser", "locale", v["title"], "info",
+                     v["detail"], ev, v["advice"], probe="webrtc")
+    if state == "zh-first":
+        # 出口本来就在中文区时，这条只是把同一件事说了一遍，不重复扣分
+        if target in _GREATER_CHINA:
+            return _item(
+                "locale.browser", "locale",
+                v["title"] + "（与出口地区一致）",
+                "info",
+                v["detail"] + f" 本次出口在 {target}，中文语言与出口地区本身一致，"
+                              "不构成新增线索；只是外部探针仍会把 Accept-Language 一项标出来。",
+                ev, "不需要改。换到非中文区出口时，记得连同浏览器语言一起改。",
+                probe="webrtc",
+            )
+        return _item("locale.browser", "locale", v["title"], "medium",
+                     v["detail"], ev, v["advice"], probe="webrtc")
+    if state == "region-mismatch":
+        return _item("locale.browser", "locale", v["title"], "medium",
+                     v["detail"], ev, v["advice"], probe="webrtc")
+    if state == "tz-differs":
+        return _item("locale.browser", "locale", v["title"], "low",
+                     v["detail"], ev, v["advice"], probe="webrtc")
+    return _item("locale.browser", "locale", v["title"], "pass",
+                 v["detail"], ev, probe="webrtc")
+
+
+def _check_browser_ua() -> dict:
+    """浏览器 UA 里的国产浏览器与国产设备。
+
+    这一项和 `locale.browser` 不重复：那一项看语言/区域/时区，这一项看
+    「你现在用的这个浏览器本身是不是国产的」。语言可以改、时区可以改，
+    UA 里的 `MicroMessenger` / `Quark` 改不掉——除非换浏览器。
+
+    数据来自浏览器上一次实测（和 WebRTC 同一次 POST），没测过就报「还没实测」，
+    不猜。UA 是空串时同样不下结论：读不到不等于干净。
+    """
+    rec = browserwebrtc.load() or {}
+    ua = str(rec.get("ua") or "")
+    info = uatraits.classify(ua)
+    if not info["checked"]:
+        return _item(
+            "fp.cn_browser", "fingerprint", "浏览器 UA 还没实测", "info",
+            "国产浏览器 / App 内 WebView 的特征只写在 UA 里，这一项只能由浏览器自己回答。"
+            "没测过不代表干净。",
+            [], "点「在本机浏览器里实测」，页面会连同 ICE 候选一起回传 UA。",
+            probe="webrtc",
+        )
+
+    ev = [_ev("UA", ua[:120] + ("…" if len(ua) > 120 else ""), mono=True)]
+    if info["browser"]:
+        return _item(
+            "fp.cn_browser", "fingerprint",
+            f"当前浏览器是{info['browser']}", "high",
+            "UA 里带着国产浏览器 / App 内 WebView 的标识。这一层比语言和时区都硬："
+            "语言列表可以在设置里改，时区可以换，UA 只有换浏览器才会变。"
+            "外部探针只要读到这一串，前面那些「已经改成英文环境」的工作就白做了。",
+            ev,
+            "日常访问 Claude 请用 Chrome / Edge / Firefox / Safari 的原生版本，"
+            "不要用微信、钉钉、夸克、UC 这类内置或国产浏览器打开。"
+            "如果这台机器上必须用国产浏览器办公，至少给 Claude 单独开一个浏览器配置档案。",
+            probe="webrtc",
+        )
+    if info["device"]:
+        # 设备品牌单独看权重：鸿蒙是决定性的，也卖全球的品牌低一些。
+        sev = "medium" if info["deviceScore"] >= 0.8 else "low"
+        return _item(
+            "fp.cn_browser", "fingerprint",
+            f"浏览器报的设备是{info['device']}", sev,
+            "UA 里带着国产设备品牌。品牌本身不是判定依据——小米、OPPO 在海外也卖——"
+            "但和中文语言、中文时区叠在一起时，它会让「这是一台中文区设备」这个结论更稳。"
+            "鸿蒙这类只在国内生态里出现的系统标识权重最高。",
+            ev,
+            "这一项只能靠换设备改变，不建议为了它去伪装 UA："
+            "改了 UA 但时区、语言、字体还对不上，反而更像刻意伪装。",
+            probe="webrtc",
+        )
+    return _item(
+        "fp.cn_browser", "fingerprint", "浏览器 UA 没有国产特征", "pass",
+        "UA 里既没有国产浏览器 / App 内 WebView 的标识，也没有国产设备品牌。"
+        "这一层不构成额外线索。",
+        ev, probe="webrtc",
     )
 
 
@@ -1394,6 +1571,15 @@ def check_network(with_network: bool = True) -> tuple[list[dict], dict]:
                 "出口确认后再扫一次。",
             )
         )
+        items.append(
+            _item(
+                "net.domain_egress", "network",
+                "Claude 边缘出口未检测", "info",
+                reason + "没有向 Claude 域名发请求。",
+                [],
+                "出口确认后再扫一次。",
+            )
+        )
         return items, info
 
     country = (info.get("country") or "").upper()
@@ -1489,6 +1675,7 @@ def check_network(with_network: bool = True) -> tuple[list[dict], dict]:
         )
 
     items.append(_check_reachable())
+    items.append(_check_domain_egress(info))
     items.append(_check_webrtc(info.get("ip_masked") or ""))
     return items, info
 
@@ -1560,11 +1747,61 @@ def _check_reachable() -> dict:
     )
 
 
+def _check_domain_egress(info: dict) -> dict:
+    """Claude 自己的边缘节点看到的出口，是否和这次探测的出口一致。
+
+    出口探测走的是第三方 IP 接口；分流规则按域名生效，claude.ai 完全可能
+    走另一条路。这里直接问 Claude 的域名「你看到我是谁」，比任何第三方
+    接口都更接近 Claude 的真实视角。完整地址只在比对时用，证据里全是打码值。
+    """
+    r = domainegress.probe(
+        baseline_ip=info.get("ip") or "",
+        baseline_mask=info.get("ip_masked") or "",
+    )
+    ev: list[dict] = []
+    for row in r["rows"]:
+        if row.get("ipMasked"):
+            where = " · ".join(x for x in (row.get("loc"), row.get("colo")) if x)
+            ev.append(_ev(row["host"], f"{row['ipMasked']}" + (f" · {where}" if where else ""), mono=True))
+        else:
+            ev.append(_ev(row["host"], row.get("error") or "没取到", mono=True))
+    ev.append(_ev("比对基线", r.get("baselineMasked") or "这次没有基线", mono=True))
+
+    sev = "high" if r["state"] in ("split", "mismatch") else (
+        "pass" if r["state"] == "match" else "info")
+    if r["state"] in ("split", "mismatch"):
+        advice = ("先检查分流规则：claude.ai、claude.com 与 api.anthropic.com 是否都指向"
+                  "同一个代理组。只写了其中一个，另一个就会按默认规则直连。也可以直接开 TUN 全接管。")
+    elif r["state"] == "match":
+        advice = ""
+    elif r["state"] == "unbaselined":
+        advice = "等出口探测恢复正常后再扫一次，才能判断这两个地址是不是同一个出口。"
+    elif r["state"] == "unavailable":
+        advice = ("如果浏览器能打开 claude.ai，多半是分流规则把 /cdn-cgi/trace 拦了。"
+                  "这不是故障，只是这一项没拿到证据。")
+    else:
+        advice = "TUN 打开并接管 IPv6 后再扫一次，或者先把出口固定到一种地址族。"
+
+    return _item(
+        "net.domain_egress", "network",
+        r["title"], sev, r["detail"], ev, advice,
+        tags=["hard-signal"] if sev == "high" else [],
+    )
+
+
 def _check_webrtc(egress_mask: str) -> dict:
     """UDP 有没有和 HTTP 走同一条路。
 
-    判据和哨兵那边一致：只看境外节点，且只在「分裂」时报警。
-    国内节点回真实地址是分流规则的正确结果，拿它判会天天误报。
+    两件事分开判，因为它们的证据强度不一样：
+
+    1. `exposedLeak`——国内 STUN 节点回了非基线地址。分流把国内域名放直连，
+       所以这是「正确答案」；但浏览器 ICE 候选是交给**任何**网页的，境外
+       页面照样读得到，属于确定性暴露，不是可能。
+    2. `leak`——境外节点自相矛盾，说明 UDP 被有选择地放出去。
+
+    只判第 2 项会漏掉最常见的一种：所有节点（含境外）都回同一个直连地址，
+    境外节点之间并不「分裂」，但真实地址已经交出去了。实测过一次——
+    TCP 走代理、UDP 全直连，五个 STUN 全返回同一个家庭地址。
 
     证据里的地址一律打码：STUN 拿到的国内地址就是用户家的真实出口，
     完整写进页面和导出的报告，等于这次检测自己制造了一次泄漏。
@@ -1575,6 +1812,23 @@ def _check_webrtc(egress_mask: str) -> dict:
         _ev("境外节点", "、".join(netprobe._mask_ip(ip) for ip in r["foreign"]) or "无", mono=True),
         _ev("比对基线", r["mask"] or "（塔还没记录）", mono=True),
     ]
+    if r.get("exposedLeak"):
+        exposed = "、".join(netprobe._mask_ip(ip) for ip in r["exposed"])
+        return _item(
+            "net.webrtc", "network",
+            "WebRTC 会把真实地址交给网页",
+            "critical",
+            f"国内 STUN 节点回了 {exposed}，和你当前的出口基线不是同一个。"
+            "分流规则把国内域名放直连，节点回家里的真实地址是正确答案；"
+            "但浏览器的 ICE 候选是交给任何网页的，境外页面同样读得到这个地址。"
+            "这不是「可能泄漏」，是已经交出去了。",
+            ev,
+            "最省事的做法是把 STUN/TURN 端口直接拒掉，不依赖代理组是否支持 UDP："
+            "3478 / 5349 / 19302 三个端口的 UDP 全部 REJECT。"
+            "用 FlClash / Clash Verge / ClashX 的话，可在「隐私设置 → 置顶分流修复」里"
+            "把端口策略选成「直接拒绝」再写入；代价是浏览器内的 P2P 视频通话会不可用。",
+            tags=["hard-signal"],
+        )
     if r["leak"]:
         return _item(
             "net.webrtc", "network",
@@ -1941,6 +2195,51 @@ def check_residue() -> list[dict]:
 # ---------------------------------------------------------------- 设备标识
 
 
+def _check_location() -> dict:
+    """定位服务总开关。
+
+    外部探针会把「本机定位」算作一项：桌面端和浏览器 API 拿到权限后能读到
+    物理坐标，这跟出口 IP 在不在海外没有关系。开关只有 root 能读，所以这里
+    读的是「用户上一次授权读取」的缓存；没有缓存就明说没读，不假装它关着。
+    """
+    st = location.status()
+    ev: list[dict] = []
+    if st.get("at"):
+        ev.append(_ev("上次读取",
+                      time.strftime("%m-%d %H:%M", time.localtime(st["at"])), mono=True))
+    if st.get("enabled") is not None:
+        ev.append(_ev("定位服务", "已开启" if st["enabled"] else "已关闭"))
+    steps = ("位置在「系统设置 → 隐私与安全性 → 定位服务」最上面的总开关。"
+             "总开关开着只是「允许申请」的前提，具体哪个应用能读，还要看下面那份列表。")
+    if not st.get("supported"):
+        return _item("dev.location", "device", "定位服务：仅 macOS 检查", "info",
+                     "Windows 上由「设置 → 隐私和安全性 → 位置」控制，本工具暂不读取。",
+                     ev, "在系统设置里确认位置服务总开关是关的。")
+    if not st.get("checked"):
+        if st.get("stale"):
+            title = "定位服务状态已过期"
+            detail = ("上次读取超过一周，中间可能已经改过；不拿旧值下结论。")
+        else:
+            title = "定位服务开关未读取"
+            detail = ("这个开关写在 /var/db/locationd 下，只有 root 能读，常规扫描读不到。"
+                      "没读过就不说它是关着的。")
+        return _item("dev.location", "device", title, "info", detail, ev,
+                     "点「授权读取」跑一次带管理员权限的读取；" + steps,
+                     probe="location")
+    if st["enabled"]:
+        return _item(
+            "dev.location", "device",
+            "定位服务总开关是开着的",
+            "medium",
+            "桌面端与浏览器 API 都可以申请定位权限。总开关开着是前提，"
+            "真正读到坐标还要看具体应用有没有被勾选；但它和出口 IP 无关，"
+            "是一条独立的地理线索——换了 IP 却忘了这一层的人很多。",
+            ev, steps, probe="location")
+    return _item("dev.location", "device", "定位服务总开关已关闭", "pass",
+                 "所有应用都无法申请定位权限，这一条不再构成地理线索。", ev,
+                 probe="location")
+
+
 def check_device() -> list[dict]:
     uuid = ""
     serial = ""
@@ -1970,6 +2269,7 @@ def check_device() -> list[dict]:
     name = compat.computer_name()
 
     return [
+        _check_location(),
         _item(
             "dev.identity",
             "device",

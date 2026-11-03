@@ -1,7 +1,11 @@
 import Foundation
 
-/// 与 Tower 共用的状态文件。Tower 写基线（时区、出口国家、识别到的客户端），
-/// Shield 只读基线、写自己的开关与命中记录——单向依赖，不会互相覆盖。
+/// 与 Tower 共用的状态文件。
+///
+/// 基线（时区、出口国家、打码出口）两边都会写：塔在扫描后写一次，
+/// 哨兵每天自己用 Claude 边缘的 trace 结果续期，这样不开塔也不会过期。
+/// 时区基线仍然只有塔能建——哨兵分不清「该是哪个时区」。
+/// 写到同一个出口时按时间取新的那份，谁都不整套覆盖对方。
 struct Config: Codable {
     var version = 1
     var enabled = true
@@ -9,11 +13,16 @@ struct Config: Codable {
     var level = 1
     var baselineTz = ""
     var country = ""
-    /// 塔写下的打码出口地址（`1.2.*.4`）。拿它跟 STUN 结果比对，
+    /// 打码后的出口地址（`1.2.*.4`）。拿它跟 STUN 结果比对，
     /// 判断 UDP 出口和 HTTP 出口是不是同一个。
     var egressIP = ""
-    /// 塔记录这个出口的时间。过期了就不敢拿它下结论。
+    /// 这个出口最后一次被确认/续期的时间。过期了就不敢拿它下结论。
     var egressAt: Double = 0
+    /// 测到了、但和基线对不上的出口。等用户确认后才替换基线——
+    /// 静默跟着新值走，真泄漏也会被记成「正常」。
+    var egressSeen = ""
+    var egressSeenAt: Double = 0
+    var egressSeenCountry = ""
     var clients: [String] = []
     var interval = 30
     /// 暂停到这个时间戳之前不再巡检
@@ -44,6 +53,9 @@ struct Config: Codable {
         country = (try? c.decodeIfPresent(String.self, forKey: .country)) ?? ""
         egressIP = (try? c.decodeIfPresent(String.self, forKey: .egressIP)) ?? ""
         egressAt = (try? c.decodeIfPresent(Double.self, forKey: .egressAt)) ?? 0
+        egressSeen = (try? c.decodeIfPresent(String.self, forKey: .egressSeen)) ?? ""
+        egressSeenAt = (try? c.decodeIfPresent(Double.self, forKey: .egressSeenAt)) ?? 0
+        egressSeenCountry = (try? c.decodeIfPresent(String.self, forKey: .egressSeenCountry)) ?? ""
         clients = (try? c.decodeIfPresent([String].self, forKey: .clients)) ?? []
         interval = (try? c.decodeIfPresent(Int.self, forKey: .interval)) ?? 30
         pausedUntil = (try? c.decodeIfPresent(Double.self, forKey: .pausedUntil)) ?? 0
@@ -57,13 +69,16 @@ struct Config: Codable {
     }
 }
 
-/// 塔写的那几个键。Shield 每次巡检都要重读一遍：塔可能在 Shield
+/// 基线那几个键。Shield 每次巡检都要重读一遍：塔可能在 Shield
 /// 运行期间刚扫过一次，启动时缓存的旧值会让「没有基线」的提醒一直挂着。
 struct Baseline {
     var baselineTz = ""
     var country = ""
     var egressIP = ""
     var egressAt: Double = 0
+    var egressSeen = ""
+    var egressSeenAt: Double = 0
+    var egressSeenCountry = ""
     var ruleGuard: RuleGuard?
 }
 
@@ -101,35 +116,145 @@ enum Store {
         }
         return Baseline(baselineTz: cfg.baselineTz, country: cfg.country,
                         egressIP: cfg.egressIP, egressAt: cfg.egressAt,
+                        egressSeen: cfg.egressSeen, egressSeenAt: cfg.egressSeenAt,
+                        egressSeenCountry: cfg.egressSeenCountry,
                         ruleGuard: cfg.ruleGuard)
     }
 
     static func save(_ cfg: Config) {
-        ensureDir()
         var trimmed = cfg
         if trimmed.hits.count > maxHits {
             trimmed.hits = Array(trimmed.hits.suffix(maxHits))
         }
-        // 写之前把塔刚写的基线读回来。
+        // 写之前把盘上的基线读回来。
         // Shield 只在启动时加载一次，之后每记一条命中就整份写回——这中间
-        // 塔完全可能更新了出口 IP，不读回来就会用启动时的旧值把它盖掉。
-        // 基线那几个键是塔的，我们只能读不能盖。
+        // 塔完全可能更新了基线，不读回来就会用启动时的旧值把它盖掉。
+        //
+        // 出口那一组两边都写，按「最后一次确认/测到」的时间取新的那份；
+        // 其他键各有归属：时区与规则清单归塔，开关与命中记录归哨兵。
         if let data = try? Data(contentsOf: fileURL),
            let disk = try? JSONDecoder().decode(Config.self, from: data) {
             if !disk.baselineTz.isEmpty { trimmed.baselineTz = disk.baselineTz }
-            if !disk.country.isEmpty { trimmed.country = disk.country }
-            if !disk.egressIP.isEmpty { trimmed.egressIP = disk.egressIP }
-            if disk.egressAt > trimmed.egressAt { trimmed.egressAt = disk.egressAt }
+            if egressStamp(disk) > egressStamp(trimmed) {
+                trimmed.egressIP = disk.egressIP
+                trimmed.egressAt = disk.egressAt
+                trimmed.country = disk.country
+                trimmed.egressSeen = disk.egressSeen
+                trimmed.egressSeenAt = disk.egressSeenAt
+                trimmed.egressSeenCountry = disk.egressSeenCountry
+            }
             // 规则清单整份归塔管：塔撤销修复时会把 key 删掉，这里必须跟着
             // 变成 nil，否则哨兵会把自己内存里的旧清单又写回去，永远报漂移。
             trimmed.ruleGuard = disk.ruleGuard
         }
+        write(trimmed)
+    }
+
+    private static func write(_ cfg: Config) {
+        ensureDir()
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(trimmed) else { return }
+        guard let data = try? enc.encode(cfg) else { return }
         try? data.write(to: fileURL, options: .atomic)
         // 里面有时区和出口国家，虽然算不上秘密，也没必要给同机其他用户读
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    }
+
+    // MARK: - 出口基线
+
+    /// 自测出口的续期周期。比对只信任 24 小时以内的基线，20 小时续一次，
+    /// 留出一轮失败重试的余量——网络抖一下不该让比对能力掉线一天。
+    static let egressRenew: Double = 20 * 3600
+
+    enum EgressUpdate: String {
+        case skipped, adopted, refreshed, cleared, pending
+    }
+
+    private static func egressStamp(_ cfg: Config) -> Double {
+        max(cfg.egressAt, cfg.egressSeenAt)
+    }
+
+    /// 纯逻辑，不碰磁盘：测试直接喂 Config 和时间点。
+    ///
+    /// 测到的出口和基线不同时**不**覆盖基线，只记成待确认。基线是
+    /// 「UDP 出口该长什么样」的参照，跟着新值悄悄走的话，真泄漏会被
+    /// 当成正常。只有用户点「是我换的」才替换（`confirmEgress`）。
+    ///
+    /// 只收 IPv4 打码地址：STUN 比对是按 IPv4 掩码做的，IPv6 记进来
+    /// 只会让这一项永远「没法比对」。
+    static func applyEgress(_ cfg: inout Config, mask: String, country: String,
+                            at: Double) -> EgressUpdate {
+        guard mask.contains("*"), !mask.contains(":") else { return .skipped }
+        let country = country.uppercased()
+        if cfg.egressIP.isEmpty {
+            cfg.egressIP = mask
+            cfg.egressAt = at
+            if !country.isEmpty { cfg.country = country }
+            clearSeen(&cfg, at: at)
+            return .adopted
+        }
+        if mask == cfg.egressIP {
+            var out: EgressUpdate = .skipped
+            if !cfg.egressSeen.isEmpty {
+                clearSeen(&cfg, at: at)
+                out = .cleared
+            }
+            if at - cfg.egressAt >= egressRenew {
+                cfg.egressAt = at
+                if !country.isEmpty { cfg.country = country }
+                if out == .skipped { out = .refreshed }
+            }
+            return out
+        }
+        if cfg.egressSeen == mask { return .skipped }
+        cfg.egressSeen = mask
+        cfg.egressSeenAt = at
+        cfg.egressSeenCountry = country
+        return .pending
+    }
+
+    /// 用户确认「这个新出口是我自己换的」，才把待确认的地址升成基线。
+    static func confirmEgress(_ cfg: inout Config, at: Double) -> Bool {
+        guard !cfg.egressSeen.isEmpty else { return false }
+        cfg.egressIP = cfg.egressSeen
+        cfg.egressAt = at
+        if !cfg.egressSeenCountry.isEmpty { cfg.country = cfg.egressSeenCountry }
+        clearSeen(&cfg, at: at)
+        return true
+    }
+
+    private static func clearSeen(_ cfg: inout Config, at: Double) {
+        cfg.egressSeen = ""
+        cfg.egressSeenCountry = ""
+        // 时间戳留着当水印：别的写入方拿着更旧的待确认记录时，
+        // 不能把「已经确认过」的状态又盖回去。
+        cfg.egressSeenAt = at
+    }
+
+    /// 读盘、按规则更新、整份写回。盘上那份已经是最新，只需要换掉出口
+    /// 那几个键，其余键（开关、命中记录、规则清单）原样保留。
+    @discardableResult
+    static func recordEgress(_ cfg: inout Config, mask: String, country: String,
+                             at: Double) -> EgressUpdate {
+        // 塔可能刚扫过，比内存里的新。先把它并进来再判，免得用旧基线做决定。
+        // 只并塔写的那几个键：读坏了就跳过，不能拿默认值把内存里的基线清空。
+        if let data = try? Data(contentsOf: fileURL),
+           let disk = try? JSONDecoder().decode(Config.self, from: data) {
+            if !disk.baselineTz.isEmpty { cfg.baselineTz = disk.baselineTz }
+            if egressStamp(disk) > egressStamp(cfg) {
+                cfg.egressIP = disk.egressIP
+                cfg.egressAt = disk.egressAt
+                cfg.country = disk.country
+                cfg.egressSeen = disk.egressSeen
+                cfg.egressSeenAt = disk.egressSeenAt
+                cfg.egressSeenCountry = disk.egressSeenCountry
+            }
+            cfg.ruleGuard = disk.ruleGuard
+        }
+        let update = applyEgress(&cfg, mask: mask, country: country, at: at)
+        guard update != .skipped else { return update }
+        write(cfg)
+        return update
     }
 
     /// 追加一条命中记录。同一种状态在 5 分钟内反复出现只记一次——

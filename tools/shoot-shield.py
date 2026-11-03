@@ -64,6 +64,18 @@ CASES = [
         # 安全态不写命中记录（apply 只记 danger/warn），所以这里也留空
         "hits": [],
     }),
+    ("shield-dns-country", "解析器与出口不同国（只旁注，不改判定）", {
+        "verdict": "safe", "title": "守护中",
+        "note": "出口在位。解析器与 HTTP 出口不在同一个国家：递归本身不在国内，"
+                "但第三方探针会把「DNS 国家」一项标红。",
+        "tun": True, "tunIface": "utun4", "sysProxy": False,
+        "dns": "198.18.2.160", "dnsFake": True, "dnsChecked": True, "dnsSuspect": False,
+        "dnsResolver": "172.69.*.85", "dnsResolverChecked": True,
+        "dnsResolverCountry": "JP", "dnsResolverOrg": "Cloudflare, Inc.",
+        "stun": ["5.34.*.136"], "stunForeign": ["5.34.*.136"],
+        "stunChecked": True, "stunLeak": False,
+        "hits": [],
+    }),
     ("shield-dns", "TUN 在位但 DNS 没被接管", {
         "verdict": "warn", "title": "DNS 未接管",
         "note": "出口在位，但 claude.ai 解析成了真实地址（160.79.104.10）——"
@@ -189,6 +201,23 @@ CASES = [
         "hits": [
             {"ts": time.time() - 240, "kind": "gate",
              "note": "出口已断；已请求 Claude 退出（pid 5127）"},
+        ],
+    }),
+    ("shield-egress", "出口变了，等用户确认", {
+        # 基线是 US · 5.34.*.136，哨兵自己测到 SG · 9.9.*.10。不能静默换基线，
+        # 横幅把两个地址摊开，确认按钮只在用户认下这一次之后才改基线。
+        "verdict": "safe", "title": "守护中",
+        "note": "Claude 在运行，出口在位。",
+        "tun": True, "tunIface": "utun4", "sysProxy": False,
+        "dns": "198.18.2.160", "dnsFake": True, "dnsChecked": True, "dnsSuspect": False,
+        "stun": ["9.9.*.10"], "stunForeign": ["9.9.*.10"],
+        "stunChecked": True, "stunLeak": False,
+        "maskFresh": False, "towerState": "stale",
+        "egressSeen": "9.9.*.10", "egressSeenCountry": "SG",
+        "egressSeenAt": time.time() - 120,
+        "hits": [
+            {"ts": time.time() - 120, "kind": "egress",
+             "note": "出口从 US · 5.34.*.136 变成 SG · 9.9.*.10，等确认"},
         ],
     }),
     ("shield-danger", "没有任何出口", {

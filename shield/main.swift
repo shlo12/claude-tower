@@ -13,9 +13,12 @@ if CommandLine.arguments.contains("--probe-dump") {
     // 走真实的配置文件，这样 --probe-dump 就是一次完整的端到端自检，
     // 而不是「用空基线跑一遍」——后者永远看不到 STUN 比对的结果。
     let cfg = Store.load()
+    let pending = !cfg.egressSeen.isEmpty
     let fresh = cfg.egressAt > 0 && Date().timeIntervalSince1970 - cfg.egressAt < 86400
+        && !pending
     let snap = Probe.run(baselineTz: cfg.baselineTz, egressMask: cfg.egressIP,
-                         maskFresh: fresh, ruleGuard: cfg.ruleGuard,
+                         maskFresh: fresh, egressPending: pending,
+                         ruleGuard: cfg.ruleGuard,
                          forceStun: true, forceFresh: true,
                          forceTransport: true)
     let payload: [String: Any] = [
@@ -30,11 +33,17 @@ if CommandLine.arguments.contains("--probe-dump") {
         "dnsFake": snap.dnsFake,
         "dnsChecked": snap.dnsChecked,
         "dnsSuspect": snap.dnsSuspect,
+        "dnsResolver": Probe.maskResolver(snap.dnsResolverIP),
+        "dnsResolverOrg": snap.dnsResolverOrg,
+        "dnsResolverCountry": snap.dnsResolverCountry,
+        "dnsResolverChecked": snap.dnsResolverChecked,
+        "dnsEgressSuspect": snap.dnsEgressSuspect,
         // 和面板一样打码：这个输出常被重定向到文件，落盘的不能是真实地址。
         "stun": snap.stunAll.map(Probe.maskIP),
         "stunForeign": snap.stunForeign.map(Probe.maskIP),
         "stunChecked": snap.stunChecked,
         "stunLeak": snap.stunLeak,
+        "stunExposed": snap.stunExposed.map(Probe.maskIP),
         "connectionsState": snap.connections.state,
         "connectionsDetail": snap.connections.detail,
         "connectionsObserved": snap.connections.observed,
@@ -45,8 +54,20 @@ if CommandLine.arguments.contains("--probe-dump") {
         "transportLabel": snap.transportLabel,
         "transportDetail": snap.transportDetail,
         "transportAt": snap.transportAt,
+        "domainChecked": snap.domainChecked,
+        "domainState": snap.domainState,
+        "domainLabel": snap.domainLabel,
+        "domainDetail": snap.domainDetail,
+        "domainAt": snap.domainAt,
         "egressMask": snap.egressMask,
         "maskFresh": snap.maskFresh,
+        // 哨兵自己测到的出口只以打码形式出终端：这个输出常被重定向到文件。
+        "egressCandidate": Probe.maskIP(snap.egressCandidateIP),
+        "egressCandidateCountry": snap.egressCandidateCountry,
+        "egressPending": snap.egressPending,
+        "egressSeen": cfg.egressSeen,
+        "egressSeenAt": cfg.egressSeenAt,
+        "egressSeenCountry": cfg.egressSeenCountry,
         "towerData": snap.hasTowerData,
         "towerState": snap.towerState,
         "environmentReady": snap.environmentReady,

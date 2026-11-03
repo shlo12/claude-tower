@@ -664,5 +664,201 @@ class ManualClientTests(_PatchMixin, unittest.TestCase):
         self.assertIn("手动", str(ctx.exception))
 
 
+class _FakeFlclashSettings:
+    """内存里的 patchClashConfig，替代 `defaults read/write`。
+
+    真机上这两步走的是 cfprefsd，测试里既不该读也不该写用户的 plist。
+    """
+
+    def __init__(self, servers, fail_write=False, fail_readback=None):
+        self.cfg = {"currentProfileId": 1,
+                    "patchClashConfig": {"dns": {"enable": True,
+                                                 "nameserver": list(servers)}}}
+        self.fail_write = fail_write
+        # 回读时返回这份（模拟写入没生效），None 表示按实际写入的返回
+        self.fail_readback = fail_readback
+        self.writes = []
+        self.calls = []
+
+    def read(self):
+        self.calls.append("read")
+        if self.fail_readback is not None:
+            cfg = json.loads(json.dumps(self.cfg))
+            cfg["patchClashConfig"]["dns"]["nameserver"] = list(self.fail_readback)
+            return cfg, ""
+        return json.loads(json.dumps(self.cfg)), ""
+
+    def write(self, cfg):
+        self.calls.append("write")
+        if self.fail_write:
+            return False
+        self.cfg = json.loads(json.dumps(cfg))
+        self.writes.append(list(cfg["patchClashConfig"]["dns"]["nameserver"]))
+        return True
+
+    @property
+    def servers(self):
+        return self.cfg["patchClashConfig"]["dns"]["nameserver"]
+
+
+class DnsFixTests(unittest.TestCase):
+    """把 nameserver 统一到一家。
+
+    两家一起挂，内核并行发查询、谁先回用谁，「DNS 出口」就随查询在两家之间
+    跳。这里固定：只删多余那家、保留协议与 `#<代理组>` 后缀、只留一个地址时
+    补同家的另一个 anycast、写前必须退出客户端、撤销能原样恢复。
+    """
+
+    CF = "https://1.1.1.1/dns-query#PROXY"
+    GOOGLE = "https://8.8.8.8/dns-query#PROXY"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+
+        def patch_attr(obj, name, value):
+            p = patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+        self.patch_attr = patch_attr
+        self.patch_attr(proxyfix, "STATE_DNS", root / ".ccclean/proxydns-fix.json")
+        self.patch_attr(proxyfix, "FLCLASH_CONFIG", root / "config.yaml")
+        self.patch_attr(proxyfix.compat, "IS_MAC", True)
+        self.patch_attr(proxyfix, "_proc_alive", lambda *a, **k: True)
+        self.patch_attr(proxyfix, "_quit", lambda: True)
+        self.patch_attr(proxyfix, "_launch", lambda: True)
+        self.patch_attr(proxyfix, "_wait_dns", lambda *a, **k: True)
+
+    def use(self, store):
+        self.patch_attr(proxyfix, "_flclash_settings", store.read)
+        self.patch_attr(proxyfix, "_write_settings", store.write)
+        return store
+
+    # ---- 纯函数：怎么算「只留一家」
+
+    def test_plan_drops_the_other_family(self):
+        plan = proxyfix._dns_plan([self.CF, self.GOOGLE])
+        self.assertTrue(plan["mixed"])
+        self.assertEqual(plan["family"], "cloudflare")
+        self.assertEqual(plan["drop"], [self.GOOGLE])
+        self.assertEqual(plan["next"], [self.CF, "https://1.0.0.1/dns-query#PROXY"])
+
+    def test_plan_keeps_protocol_port_and_relay_suffix(self):
+        plan = proxyfix._dns_plan(["tls://1.1.1.1:853", "https://8.8.8.8/dns-query"])
+        self.assertEqual(plan["next"], ["tls://1.1.1.1:853", "tls://1.0.0.1:853"])
+
+    def test_plan_does_not_duplicate_an_existing_sibling(self):
+        plan = proxyfix._dns_plan([self.CF, "https://1.0.0.1/dns-query#PROXY",
+                                   self.GOOGLE])
+        self.assertEqual(plan["added"], [])
+        self.assertEqual(plan["next"],
+                         [self.CF, "https://1.0.0.1/dns-query#PROXY"])
+
+    def test_plan_prefers_cloudflare_over_google(self):
+        plan = proxyfix._dns_plan(["https://8.8.8.8/dns-query", "tls://9.9.9.9"])
+        self.assertEqual(plan["family"], "quad9")
+
+    def test_plan_leaves_system_in_place(self):
+        plan = proxyfix._dns_plan(["system", self.CF, self.GOOGLE])
+        self.assertEqual(plan["next"][0], "system")
+
+    def test_plan_is_noop_for_a_single_family(self):
+        plan = proxyfix._dns_plan([self.CF, "https://1.0.0.1/dns-query#PROXY"])
+        self.assertFalse(plan["mixed"])
+        self.assertEqual(plan["next"], [self.CF, "https://1.0.0.1/dns-query#PROXY"])
+
+    # ---- 读状态
+
+    def test_status_reports_the_mix(self):
+        self.use(_FakeFlclashSettings([self.CF, self.GOOGLE]))
+        st = proxyfix.dns_status()
+        self.assertTrue(st["mixed"])
+        self.assertTrue(st["canApply"])
+        self.assertEqual(st["families"], ["cloudflare", "google"])
+        self.assertEqual(st["familyLabel"], "Cloudflare")
+        self.assertFalse(st["applied"])
+
+    def test_status_with_one_family_is_not_applicable(self):
+        self.use(_FakeFlclashSettings([self.CF, "https://1.0.0.1/dns-query#PROXY"]))
+        st = proxyfix.dns_status()
+        self.assertFalse(st["mixed"])
+        self.assertFalse(st["canApply"])
+        self.assertIn("不需要改", st["message"])
+
+    # ---- 写入
+
+    def test_apply_unifies_and_records_undo(self):
+        store = self.use(_FakeFlclashSettings([self.CF, self.GOOGLE]))
+        out = proxyfix.apply("dns")
+        self.assertEqual(store.servers,
+                         [self.CF, "https://1.0.0.1/dns-query#PROXY"])
+        self.assertIn("Cloudflare", out["message"])
+        self.assertTrue(out["applied"])
+        self.assertTrue(out["canUndo"])
+        saved = json.loads(proxyfix.STATE_DNS.read_text(encoding="utf-8"))
+        self.assertEqual(saved["before"], [self.CF, self.GOOGLE])
+        self.assertEqual(saved["after"], store.servers)
+
+    def test_apply_quits_before_writing(self):
+        # 不先退出的话，客户端退出时会把内存里的旧值刷回去，写了也白写。
+        order = []
+        self.patch_attr(proxyfix, "_quit", lambda: order.append("quit") or True)
+        store = self.use(_FakeFlclashSettings([self.CF, self.GOOGLE]))
+        store.write = (lambda orig: lambda cfg: order.append("write") or orig(cfg))(
+            store.write)
+        self.patch_attr(proxyfix, "_write_settings", store.write)
+        proxyfix.apply("dns")
+        self.assertEqual(order[:2], ["quit", "write"])
+
+    def test_apply_is_a_noop_when_already_single(self):
+        store = self.use(_FakeFlclashSettings([self.CF, "https://1.0.0.1/dns-query#PROXY"]))
+        out = proxyfix.apply("dns")
+        self.assertEqual(store.writes, [])
+        self.assertIn("不需要改", out["message"])
+
+    def test_apply_relaunches_when_the_write_fails(self):
+        self.use(_FakeFlclashSettings([self.CF, self.GOOGLE], fail_write=True))
+        launched = []
+        self.patch_attr(proxyfix, "_launch", lambda: launched.append(1) or True)
+        with self.assertRaises(RuntimeError) as ctx:
+            proxyfix.apply("dns")
+        self.assertIn("写入", str(ctx.exception))
+        self.assertTrue(launched, "写失败后必须把客户端重新打开")
+        self.assertFalse(proxyfix.STATE_DNS.exists())
+
+    def test_apply_rolls_back_when_the_readback_disagrees(self):
+        store = self.use(_FakeFlclashSettings(
+            [self.CF, self.GOOGLE], fail_readback=[self.CF, self.GOOGLE]))
+        with self.assertRaises(RuntimeError) as ctx:
+            proxyfix.apply("dns")
+        self.assertIn("回读", str(ctx.exception))
+        # 最后一次写是把原样写回去
+        self.assertEqual(store.servers, [self.CF, self.GOOGLE])
+        self.assertFalse(proxyfix.STATE_DNS.exists())
+
+    # ---- 撤销
+
+    def test_undo_restores_the_original_list(self):
+        store = self.use(_FakeFlclashSettings([self.CF, self.GOOGLE]))
+        proxyfix.apply("dns")
+        out = proxyfix.apply("dns-undo")
+        self.assertEqual(store.servers, [self.CF, self.GOOGLE])
+        self.assertIn("已恢复", out["message"])
+        self.assertFalse(proxyfix.STATE_DNS.exists())
+
+    def test_undo_without_a_record_raises(self):
+        self.use(_FakeFlclashSettings([self.CF]))
+        with self.assertRaises(ValueError) as ctx:
+            proxyfix.apply("dns-undo")
+        self.assertIn("没有本工具留下", str(ctx.exception))
+
+    def test_unknown_action_is_still_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            proxyfix.apply("dns-delete")
+        self.assertIn("未知操作", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 import struct
@@ -50,6 +51,32 @@ SERVERS = (
 def is_fake(ip: str) -> bool:
     """fake-ip 网段。Clash / sing-box / Surge 默认都落在 198.18.0.0/15。"""
     return ip.startswith("198.18.") or ip.startswith("198.19.")
+
+
+# 运营商级 NAT 与保留段：`ipaddress.is_private` 在不同 Python 版本里对
+# 100.64.0.0/10 的判断不一致，这里单独兜一层，免得判据随解释器版本漂。
+_SHARED = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_public(ip: str) -> bool:
+    """这个地址会不会被网页当成「真实公网候选」。
+
+    WebRTC 的 ICE 候选里，局域网地址被 mDNS 藏掉、fake-ip 只是内核的内部
+    标记，两者都不构成暴露。只有真正的公网地址会被原样交给网页。
+    """
+    if not ip or is_fake(ip):
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.is_private or addr.is_loopback or addr.is_link_local:
+        return False
+    if addr.is_multicast or addr.is_reserved or addr.is_unspecified:
+        return False
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _SHARED:
+        return False
+    return True
 
 
 def _v6_prefix(addr: str) -> tuple[str, ...]:
@@ -158,6 +185,39 @@ def judge(foreign: list[str], mask: str) -> tuple[bool, str]:
     return state == "leak", reason
 
 
+def exposed_addresses(all_ips: list[str], domestic_ips: list[str],
+                      mask: str) -> tuple[list[str], str]:
+    """WebRTC 会把哪些「不属于当前出口」的公网地址交给网页。
+
+    和 `_judge_state` 问的不是同一件事：
+
+    - `_judge_state` 问「境外节点自相矛盾吗」，答案决定 leak——它描述的是
+      UDP 有没有被有选择地放出去；
+    - 这里问「有没有一个网页读得到的地址，和你现在的出口不是同一个」。
+
+    国内 STUN 节点回的正是后者。分流规则把国内域名放直连，节点回的当然是
+    家里的真实地址——对「访问国内网站」这是正确答案，但浏览器 ICE 候选
+    是交给**任何**网页的，包括境外页面。所以它必须单独报，不能并进 leak，
+    否则会把这个结论一起稀释掉。
+
+    只在「国内节点回了非基线地址」时下结论：国内节点一定走直连，这条证据
+    不依赖境外节点的表现。境外节点全都不符多半是基线过期，不报。
+    """
+    mask = (mask or "").strip()
+    if not mask:
+        return [], "塔还没记录过出口地址，没法比对"
+    if ":" in mask:
+        return [], "出口是 IPv6，打码后只剩两段，没法比对"
+    public = [ip for ip in all_ips if is_public(ip)]
+    off = [ip for ip in public if not matches_mask(ip, mask)]
+    if not off:
+        return [], ""
+    domestic = set(domestic_ips)
+    if not any(ip in domestic for ip in off):
+        return [], ""
+    return sorted(set(off)), "国内 STUN 节点回的是直连地址，浏览器会把它当作 ICE 候选交给网页"
+
+
 def reset_cache() -> None:
     """测试用。真实扫描不需要手动清，60 秒后自然过期。"""
     global _cache
@@ -181,6 +241,7 @@ def probe(egress_mask: str = "", timeout: float = 3.0, use_cache: bool = True) -
                 return dict(_cache[2])
 
     found: dict[str, bool] = {}   # ip -> 是否来自境外节点
+    domestic: set[str] = set()    # 来自国内节点的地址，判「网页读得到」用
     lock = threading.Lock()
 
     def worker(host: str, port: int, foreign: bool) -> None:
@@ -190,6 +251,8 @@ def probe(egress_mask: str = "", timeout: float = 3.0, use_cache: bool = True) -
         with lock:
             # 同一个地址可能同时被国内和境外节点看到；只要有一次来自境外就记境外
             found[ip] = found.get(ip, False) or foreign
+            if not foreign:
+                domestic.add(ip)
 
     threads = [threading.Thread(target=worker, args=s, daemon=True) for s in SERVERS]
     for t in threads:
@@ -209,6 +272,10 @@ def probe(egress_mask: str = "", timeout: float = 3.0, use_cache: bool = True) -
     result = {"ips": ips, "foreign": foreign, "ok": ok,
               "leak": state == "leak", "state": state,
               "mask": mask, "reason": reason}
+    exposed, exposed_reason = exposed_addresses(ips, sorted(domestic), mask)
+    result["exposed"] = exposed
+    result["exposedLeak"] = bool(exposed)
+    result["exposedReason"] = exposed_reason
     if use_cache:
         with _cache_lock:
             _cache = (mask, now + CACHE_TTL, dict(result))

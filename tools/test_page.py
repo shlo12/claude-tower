@@ -363,25 +363,35 @@ def main() -> int:
             "(document.querySelector('#ipv6-status')||{}).textContent||''") or ""
         checks.append(("IPv6 状态读到 Wi-Fi 服务", "当前 IPv6" in ipv6_status and "只改 Wi-Fi" in ipv6_status,
                        ipv6_status[:100]))
-        checks.append(("IPv6 关闭按钮可用", evaluate(
-            "!document.querySelector('#ipv6-off').disabled") is True))
-        evaluate("document.querySelector('#ipv6-off').click(); 'ok'")
-        wait_for("((document.querySelector('#ipv6-services')||{}).textContent||'').includes('→ Off')")
-        ipv6_rows = evaluate(
-            "(document.querySelector('#ipv6-services')||{}).textContent||''") or ""
-        checks.append(("IPv6 预览列出服务与目标", "→ Off" in ipv6_rows, ipv6_rows[:80]))
-        checks.append(("未勾选影响确认时不能执行", evaluate(
-            "document.querySelector('#ipv6-confirm').disabled") is True))
-        evaluate("""(() => {
-          const c = document.querySelector('#ipv6-ack');
-          c.checked = true;
-          c.dispatchEvent(new Event('change'));
-          return 'ok';
-        })()""")
-        wait_for("document.querySelector('#ipv6-confirm').disabled === false")
-        checks.append(("勾选影响确认后才能执行", evaluate(
-            "document.querySelector('#ipv6-confirm').disabled") is False))
-        evaluate("document.querySelector('#ipv6-cancel').click(); 'ok'")
+        # 这台机器可能已经把 Wi-Fi 的 IPv6 关掉了（本工具关过或用户手动关）。
+        # 那种状态下按钮本来就该禁用——测试不能为了让按钮可点去改用户的系统设置。
+        ipv6_auto = evaluate(
+            "((typeof ipv6State !== 'undefined' && ipv6State && ipv6State.automatic) || []).length") or 0
+        ipv6_off_disabled = evaluate(
+            "document.querySelector('#ipv6-off').disabled") is True
+        if ipv6_auto:
+            checks.append(("IPv6 关闭按钮可用", not ipv6_off_disabled))
+            evaluate("document.querySelector('#ipv6-off').click(); 'ok'")
+            wait_for("((document.querySelector('#ipv6-services')||{}).textContent||'').includes('→ Off')")
+            ipv6_rows = evaluate(
+                "(document.querySelector('#ipv6-services')||{}).textContent||''") or ""
+            checks.append(("IPv6 预览列出服务与目标", "→ Off" in ipv6_rows, ipv6_rows[:80]))
+            checks.append(("未勾选影响确认时不能执行", evaluate(
+                "document.querySelector('#ipv6-confirm').disabled") is True))
+            evaluate("""(() => {
+              const c = document.querySelector('#ipv6-ack');
+              c.checked = true;
+              c.dispatchEvent(new Event('change'));
+              return 'ok';
+            })()""")
+            wait_for("document.querySelector('#ipv6-confirm').disabled === false")
+            checks.append(("勾选影响确认后才能执行", evaluate(
+                "document.querySelector('#ipv6-confirm').disabled") is False))
+            evaluate("document.querySelector('#ipv6-cancel').click(); 'ok'")
+        else:
+            checks.append(("IPv6 已关闭时关闭按钮禁用", ipv6_off_disabled))
+            checks.append(("IPv6 已关闭时不出预览", evaluate(
+                "document.querySelector('#ipv6-preview').hidden") is True))
 
         # 自动更新：隔离 HOME 下没有配置仓库，应停在「未配置」且不露下载按钮。
         # 光检查 hidden 属性不够——.tool-row 的 display:flex 会把它盖掉，
@@ -458,6 +468,38 @@ def main() -> int:
                        str(netcfg_cleared)))
         checks.append(("清除后恢复不判断", "不会判断出口国家" in netcfg_cleared.get("status", ""),
                        netcfg_cleared.get("status", "")[:100]))
+
+        # 终端代理变量：只看预览，绝不点「确认」（会真的写 .zshrc）
+        checks.append(("终端代理卡片存在", evaluate("!!document.querySelector('#shellproxy-card')")))
+        sp_status = evaluate(
+            "(document.querySelector('#shellproxy-status')||{}).textContent||''") or ""
+        checks.append(("终端代理读到启动文件", "启动文件：" in sp_status, sp_status[:120]))
+        sp_can = evaluate("!document.querySelector('#shellproxy-apply').disabled") is True
+        if sp_can:
+            checks.append(("终端代理预览按钮可用", True))
+            evaluate("""(() => {
+              const el = document.querySelector('#shellproxy-port');
+              el.value = '7890';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              document.querySelector('#shellproxy-apply').click();
+              return 'ok';
+            })()""")
+            wait_for("!document.querySelector('#shellproxy-preview').hidden")
+            sp_block = evaluate(
+                "(document.querySelector('#shellproxy-block')||{}).textContent||''") or ""
+            checks.append(("终端代理预览显示要写的块",
+                           "ccclean terminal proxy" in sp_block, sp_block[:100]))
+            checks.append(("预览里带着端口", "127.0.0.1:7890" in sp_block, sp_block[:100]))
+            checks.append(("预览说明会先测端口",
+                           "测不通就不写" in (evaluate(
+                               "(document.querySelector('#shellproxy-preview-text')||{}).textContent||''") or "")))
+            evaluate("document.querySelector('#shellproxy-cancel').click(); 'ok'")
+            checks.append(("取消后终端代理预览收起", evaluate(
+                "document.querySelector('#shellproxy-preview').hidden") is True))
+        else:
+            # 已经有别人的代理变量时不该给写入按钮
+            checks.append(("终端代理：有冲突时不给写", "已经有代理变量" in sp_status,
+                           sp_status[:120]))
 
         # 区域格式：只看状态和预览，绝不点「确认」（会真的改系统 AppleLocale）
         checks.append(("区域格式卡片存在", evaluate("!!document.querySelector('#region-card')")))

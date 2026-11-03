@@ -100,6 +100,9 @@ def main() -> int:
             ("/api/region", {"action": "apply", "region": "US", "confirm": True}),
             ("/api/netcfg", {"country": "US"}),
             ("/api/probe/webrtc", {"candidates": []}),
+            ("/api/probe/location", {"confirm": True}),
+            ("/api/shellproxy", {"action": "apply", "port": 7890, "confirm": True}),
+            ("/api/shellproxy", {"action": "plan", "port": 7890}),
         ]:
             code, _ = request("POST", path, headers={
                 "Host": f"127.0.0.1:{PORT}", "Origin": "http://evil.example",

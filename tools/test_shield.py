@@ -126,6 +126,32 @@ ok(!Probe.isFakeIP("198.20.1.1"), "198.20 不在 198.18.0.0/15 里")
 ok(!Probe.isFakeIP("160.79.104.10"), "真实地址不该被当成 fake-ip")
 ok(!Probe.isFakeIP(""), "空串不该被当成 fake-ip")
 
+// ---- 解析器出口：fake-ip 只证明查询被接管，证明不了后面由谁解析 ----
+ok(Probe.parseResolverTXT("\"219.128.79.150\"") == "219.128.79.150",
+   "单条 TXT 要取到地址")
+ok(Probe.parseResolverTXT("\"ns1.google.com\" \"219.128.79.150\"") == "219.128.79.150",
+   "多个字符串里只认像 IP 的那段")
+ok(Probe.parseResolverTXT("") == "", "空输出不能编出地址")
+ok(Probe.maskResolver("219.128.79.150") == "219.128.*.150", "IPv4 解析器照常打码")
+ok(Probe.maskResolver("2001:db8::1") == "2001:db8:****", "IPv6 解析器也要打码")
+
+var fakeOnly = snap(tun: true, fake: true, checked: true)
+ok(!fakeOnly.dnsEgressSuspect, "只有 fake-ip 不能证明解析出口有问题")
+
+var resolverCn = fakeOnly
+resolverCn.dnsResolverIP = "219.128.79.150"
+resolverCn.dnsResolverCountry = "CN"
+resolverCn.dnsResolverChecked = true
+ok(resolverCn.dnsEgressSuspect, "TUN 在位且实测解析器在国内应判存疑")
+ok(resolverCn.verdict == .warn, "解析出口在国内只提醒，不升级成断网级告警")
+ok(resolverCn.title == "DNS 解析出口在国内", "标题要指向真正的泄漏面")
+ok(resolverCn.note.contains("219.128.*.150"), "打码后的地址要能认出来")
+ok(!resolverCn.note.contains("219.128.79.150"), "完整解析器地址不能上屏")
+
+var resolverForeign = resolverCn
+resolverForeign.dnsResolverCountry = "US"
+ok(!resolverForeign.dnsEgressSuspect, "境外解析器不该报警")
+
 // ---- 子进程输出：先排空再等退出 ----
 // `ps -axo comm=` 在本机有 100KB+，超过管道缓冲后子进程会卡在 write 上。
 // 先等退出再读就是死等，2 秒超时后拿到空串——进程检测会永远「没看到」。
@@ -194,6 +220,16 @@ ok(idleDns.idleState == .blocked, "DNS 没接管应挡住启动")
 ok(idleDns.title == "先别启动 Claude", "待命标题不能被 DNS 异常改成在跑时的标题")
 ok(idleDns.note.contains("DNS"), "要说明是 DNS 没接管挡住了启动")
 
+var idleResolve = idleDns
+idleResolve.dnsIP = "198.18.2.160"
+idleResolve.dnsFake = true
+idleResolve.dnsResolverIP = "219.128.79.150"
+idleResolve.dnsResolverCountry = "CN"
+idleResolve.dnsResolverChecked = true
+ok(idleResolve.dnsEgressSuspect, "这个样例本身应是解析出口存疑")
+ok(idleResolve.idleState == .blocked, "解析出口在国内也应挡住启动")
+ok(idleResolve.note.contains("递归"), "待命说明要指出真正做递归的是谁")
+
 // ---- 待命就绪：缺塔 / 过期 / 可启动 ----
 var noTower = Snapshot()
 noTower.claudeRunning = false
@@ -220,6 +256,13 @@ ok(ready.idleState == .ready, "出口、DNS、UDP、时区都对得上时应判 
 ok(ready.title == "可以启动 Claude", "环境正常时应直接告诉用户可以启动")
 ok(ready.note.contains("可以启动"), "就绪说明要落到「可以启动」")
 ok(ready.environmentReady, "就绪样例的 environmentReady 应为 true")
+
+var readyLeak = ready
+readyLeak.dnsResolverIP = "219.128.79.150"
+readyLeak.dnsResolverCountry = "CN"
+readyLeak.dnsResolverChecked = true
+ok(!readyLeak.environmentReady, "解析出口在国内时环境不算就绪")
+ok(readyLeak.idleState == .blocked, "解析出口在国内时不能提示可以启动")
 
 var stale = ready
 stale.maskFresh = false
@@ -436,6 +479,57 @@ ok(Probe.transportErrorLabel("timeout") == "超时", "超时要能说人话")
 ok(Probe.transportErrorLabel("tls") == "证书异常", "证书要能说人话")
 ok(Probe.transportErrorLabel("dns") == "解析失败", "DNS 要能说人话")
 ok(Probe.transportErrorLabel("") == "无响应", "空错误码说无响应")
+
+// ---- Claude 边缘出口：trace 解析与判定 ----
+ok(Probe.parseTrace("ip=203.0.113.10\nloc=us\ncolo=sjc\n")?.ip == "203.0.113.10",
+   "trace 要能取出 ip")
+ok(Probe.parseTrace("ip=203.0.113.10\nloc=us\ncolo=sjc\n")?.loc == "US",
+   "loc 统一大写")
+ok(Probe.parseTrace("ip=not-an-ip\nloc=US") == nil, "非法地址要当没取到")
+ok(Probe.parseTrace("") == nil, "空响应要当没取到")
+ok(Probe.parseTrace("ip=2001:db8::1\nloc=US")?.ip == "2001:db8::1", "IPv6 也要认")
+
+func de(_ aiIP: String, _ comIP: String, checked: Bool = true) -> Probe.DomainEgressResult {
+    var r = Probe.DomainEgressResult()
+    r.checked = checked
+    r.at = 1_700_000_000
+    var a = Probe.TraceEndpoint()
+    a.host = "claude.ai"
+    a.ip = aiIP
+    var c = Probe.TraceEndpoint()
+    c.host = "claude.com"
+    c.ip = comIP
+    r.ai = a
+    r.com = c
+    return r
+}
+
+var dv = Probe.domainEgressVerdict(de("1.2.3.4", "1.2.3.4"), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "ok", "两个域名同一出口且对上基线就是一致")
+
+dv = Probe.domainEgressVerdict(de("1.2.3.4", "1.2.9.4"), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "warn" && dv.label == "两个域名出口不同", "域名之间分裂要单独说")
+
+dv = Probe.domainEgressVerdict(de("5.6.7.8", "5.6.7.8"), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "warn" && dv.label == "与基线不一致", "和基线不一致要提醒")
+
+dv = Probe.domainEgressVerdict(de("1.2.3.4", "1.2.3.4"), mask: "", maskFresh: false)
+ok(dv.state == "warn" && dv.label.contains("无基线"), "没有基线不下结论")
+
+dv = Probe.domainEgressVerdict(de("", ""), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "off", "两个都没取到不判通过")
+
+dv = Probe.domainEgressVerdict(de("2001:db8::1", "2001:db8::1"), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "warn" && dv.label == "地址族不同", "地址族不同不能当泄漏")
+
+dv = Probe.domainEgressVerdict(de("1.2.3.4", "2001:db8::1"), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "warn" && dv.label == "部分无法比对", "部分不可比不按一致算")
+
+dv = Probe.domainEgressVerdict(de("1.2.3.4", ""), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "warn" && dv.label == "只取到一个域名", "另一个域名没回包时不能说一致")
+
+dv = Probe.domainEgressVerdict(de("1.2.3.4", "1.2.3.4", checked: false), mask: "1.2.*.4", maskFresh: true)
+ok(dv.state == "off" && dv.label.isEmpty, "没测过留空")
 
 exit(bad == 0 ? 0 : 1)
 '''
@@ -1150,8 +1244,8 @@ class UiTests(unittest.TestCase):
     # 巡检实际看的每一项都必须在面板上有一行。少了一行不是「省地方」，
     # 而是「看得到结论、看不到依据」——用户没法判断该去查哪一层。
     MONITORED = ["f-claude", "f-route", "f-tun", "f-proxy", "f-connections",
-                 "f-egress", "f-dns", "f-udp", "f-transport",
-                 "f-tz", "f-btz", "f-at", "f-update"]
+                 "f-egress", "f-dns", "f-dns-egress", "f-udp", "f-transport",
+                 "f-domain", "f-tz", "f-btz", "f-at", "f-update"]
 
     def test_panel_lists_every_monitored_field(self):
         html = read(SHIELD / "web/shield.html")
@@ -1198,6 +1292,14 @@ class UiTests(unittest.TestCase):
         self.assertIn("li.dataset.st", js)
         self.assertIn("st === 'warn'", js)
         self.assertIn("st === 'bad'", js)
+
+    def test_fact_labels_never_wrap(self):
+        """右值再长也只能自己折行：中文在字间断行会把「DNS 解析出口」
+        拆成「DNS 解析出 / 口」，看着像面板坏了而不是信息长。"""
+        css = read(SHIELD / "web/shield.css")
+        block = css.split(".facts span {", 1)[1].split("}", 1)[0]
+        self.assertIn("white-space: nowrap", block)
+        self.assertIn("flex: none", block)
 
     def test_payload_carries_baseline_freshness(self):
         """面板要显示「多久以前记的」「哪国出口」。字段不推过去，
@@ -1340,6 +1442,206 @@ class TransportTests(unittest.TestCase):
                     "transportDetail", "transportAt"):
             self.assertIn(f'"{key}"', main)
         self.assertIn("forceTransport: true", main)
+
+    def test_domain_egress_row_and_payload(self):
+        self.assertIn('id="f-domain"', self.html)
+        self.assertIn("$('#f-domain')", self.js)
+        self.assertIn("p.domainChecked", self.js)
+        self.assertIn("p.domainLabel", self.js)
+        for key in ("domainChecked", "domainState", "domainLabel",
+                    "domainDetail", "domainAt"):
+            self.assertIn(f'"{key}": snap.', self.app, f"payload 缺 {key}")
+
+    def test_domain_egress_targets_are_fixed(self):
+        m = re.search(r"static let domainTargets = \[(.*?)\]", self.probe, re.S)
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        self.assertEqual(body.count("https://"), 2, "只查两个 Claude 域名")
+        self.assertIn("claude.ai/cdn-cgi/trace", body)
+        self.assertIn("claude.com/cdn-cgi/trace", body)
+        self.assertNotIn("Authorization: Bearer", body, "不能带凭据")
+
+    def test_domain_egress_never_enters_the_verdict(self):
+        """两个域名走不同的路值得提醒，但不足以触发急停。"""
+        m = re.search(r"var verdict: Verdict \{(.*?)\n    \}", self.probe, re.S)
+        self.assertIsNotNone(m)
+        self.assertNotIn("domain", m.group(1))
+
+    def test_domain_probe_runs_only_when_exit_ready(self):
+        block = self.probe.split("if s.exitReady {", 1)[1].split("} else {", 1)[0]
+        self.assertIn("domainEgressProbe(", block)
+        self.assertIn("domainEgressProbe(force:", self.probe)
+
+    def test_probe_dump_exposes_domain_egress(self):
+        main = read(SHIELD / "main.swift")
+        for key in ("domainChecked", "domainState", "domainLabel",
+                    "domainDetail", "domainAt"):
+            self.assertIn(f'"{key}"', main)
+
+
+EGRESS_HARNESS = r'''
+import Foundation
+struct RuleGuard: Codable {}
+
+var bad = 0
+func ok(_ cond: Bool, _ msg: String) {
+    if !cond { print("FAIL: " + msg); bad += 1 }
+}
+
+let t0 = 1_700_000_000.0
+var cfg = Config()
+
+// 1 第一次测到出口：没有参照，只能采用
+ok(Store.applyEgress(&cfg, mask: "5.34.*.136", country: "jp", at: t0) == .adopted,
+   "首次测到出口应当采用")
+ok(cfg.egressIP == "5.34.*.136" && cfg.egressAt == t0 && cfg.country == "JP",
+   "首次采用要写地址、时间和国家")
+
+// 2 同一个出口，一分钟内不刷新：打开页面就会扫，每次都写盘没必要
+ok(Store.applyEgress(&cfg, mask: "5.34.*.136", country: "JP", at: t0 + 30) == .skipped,
+   "短时间内不该续期")
+ok(cfg.egressAt == t0, "30 秒后的扫描不该改时间戳")
+
+// 3 过了续期周期才续一次
+ok(Store.applyEgress(&cfg, mask: "5.34.*.136", country: "",
+                     at: t0 + Store.egressRenew) == .refreshed, "到期应当续期")
+ok(cfg.egressAt == t0 + Store.egressRenew, "续期要更新时间戳")
+ok(cfg.country == "JP", "这次没报国家就不该清掉旧值")
+
+// 4 换出口：不覆盖基线，只记待确认
+let t1 = t0 + Store.egressRenew + 10
+ok(Store.applyEgress(&cfg, mask: "9.9.*.10", country: "us", at: t1) == .pending,
+   "换出口应当待确认")
+ok(cfg.egressIP == "5.34.*.136", "待确认时不能改基线")
+ok(cfg.egressAt == t0 + Store.egressRenew, "待确认时不能续期旧基线")
+ok(cfg.country == "JP", "待确认时不能改国家")
+ok(cfg.egressSeen == "9.9.*.10" && cfg.egressSeenCountry == "US"
+   && cfg.egressSeenAt == t1, "候选地址要留住")
+
+// 5 同一个候选再测到：不重复写
+ok(Store.applyEgress(&cfg, mask: "9.9.*.10", country: "US", at: t1 + 30) == .skipped,
+   "重复候选不该重写")
+
+// 6 回到旧出口：撤掉待确认，基线还是原来的
+ok(Store.applyEgress(&cfg, mask: "5.34.*.136", country: "JP", at: t1 + 60) == .cleared,
+   "回到基线应当撤掉待确认")
+ok(cfg.egressSeen.isEmpty && cfg.egressIP == "5.34.*.136", "撤掉候选不动基线")
+ok(cfg.egressSeenAt == t1 + 60, "清空也要留时间戳水印")
+
+// 7 用户确认之后才把候选升成基线
+_ = Store.applyEgress(&cfg, mask: "9.9.*.10", country: "us", at: t1 + 120)
+ok(Store.confirmEgress(&cfg, at: t1 + 180), "有候选才能确认")
+ok(cfg.egressIP == "9.9.*.10" && cfg.country == "US", "确认后基线换成新出口")
+ok(cfg.egressSeen.isEmpty && cfg.egressSeenAt == t1 + 180, "确认后清空候选")
+ok(!Store.confirmEgress(&cfg, at: t1 + 240), "没有候选时确认应是空操作")
+
+// 8 只收 IPv4 打码地址：STUN 比对按 IPv4 掩码做
+var v6 = Config()
+ok(Store.applyEgress(&v6, mask: "2001:db8::1", country: "JP", at: t0) == .skipped,
+   "IPv6 不该入基线")
+ok(Store.applyEgress(&v6, mask: "5.34.9.136", country: "JP", at: t0) == .skipped,
+   "完整地址不该入基线")
+
+// 9 老文件没有这几个键也要能读
+let legacy = "{\"baselineTz\":\"Etc/UTC\",\"egressIP\":\"5.34.*.136\"}".data(using: .utf8)!
+let old = try! JSONDecoder().decode(Config.self, from: legacy)
+ok(old.egressSeen.isEmpty && old.egressSeenAt == 0, "缺 egressSeen 时按空处理")
+
+// 10 待确认状态要能持久化：Shield 重启后还得看得见
+var p = Config()
+_ = Store.applyEgress(&p, mask: "5.34.*.136", country: "JP", at: t0)
+_ = Store.applyEgress(&p, mask: "9.9.*.10", country: "US", at: t1)
+let back = try! JSONDecoder().decode(Config.self, from: try! JSONEncoder().encode(p))
+ok(back.egressSeen == "9.9.*.10" && back.egressSeenAt == t1
+   && back.egressIP == "5.34.*.136", "待确认候选要能读回来")
+
+if bad > 0 { exit(1) }
+print("egress rules passed")
+'''
+
+
+class EgressBaselineTests(unittest.TestCase):
+    """出口基线的纯规则：续期、待确认、确认。
+
+    这几条决定「换了节点」和「真泄漏」在面板上是不是同一件事，
+    所以真的编译出来喂时间点，不能只读源码。
+    """
+
+    def test_egress_rules(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="shield-egress-") as td:
+            d = Path(td)
+            (d / "main.swift").write_text(EGRESS_HARNESS, encoding="utf-8")
+            exe = d / "egress"
+            built = subprocess.run(
+                ["/usr/bin/swiftc", str(SHIELD / "Store.swift"),
+                 str(d / "main.swift"), "-o", str(exe)],
+                capture_output=True, text=True, timeout=180)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_probe_takes_candidate_only_when_both_domains_agree(self):
+        """两个 trace 域名报不同地址时，哪一条都不能当基线。"""
+        src = read(SHIELD / "Probe.swift")
+        self.assertIn("let reached = [dr.ai, dr.com].filter { $0.reached }", src)
+        self.assertIn("reached.allSatisfy({ $0.ip == first.ip })", src)
+        self.assertIn("s.egressCandidateIP = first.ip", src)
+        self.assertIn("s.egressCandidateCountry = first.loc", src)
+
+    def test_shield_renews_baseline_from_its_own_measurement(self):
+        """不开塔也要能续期：用 trace 测到的出口走 recordEgress。"""
+        app = read(SHIELD / "ShieldApp.swift")
+        body = app.split("func apply(_ snap: Snapshot) {", 1)[1][:400]
+        self.assertIn("refreshEgressBaseline(snap)", body)
+        self.assertIn("reportEgressChange(snap)", body)
+        m = re.search(r"func refreshEgressBaseline\(.*?\n    \}", app, re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("Store.recordEgress(", m.group(0))
+        self.assertIn("Probe.maskIP(snap.egressCandidateIP)", m.group(0))
+        # 待确认时不能拿去比对 UDP
+        self.assertIn("&& !pending", app)
+
+    def test_confirm_button_is_wired_end_to_end(self):
+        html = read(SHIELD / "web/shield.html")
+        self.assertIn('id="egress-warn"', html)
+        self.assertIn('id="btn-egress"', html)
+        self.assertIn('id="egress-note"', html)
+        js = read(SHIELD / "web" / "shield.js")
+        self.assertIn("p.egressSeen", js)
+        self.assertIn("action: 'confirm-egress'", js)
+        app = read(SHIELD / "ShieldApp.swift")
+        self.assertIn('case "confirm-egress"', app)
+        self.assertIn("Store.confirmEgress(", app)
+        for key in ('"egressSeen":', '"egressSeenAt":', '"egressSeenCountry":'):
+            self.assertIn(key, app, f"payload 缺 {key}")
+
+    def test_pending_suppresses_the_stale_banner(self):
+        """两条横幅都在说出口，会互相打架。"""
+        js = read(SHIELD / "web" / "shield.js")
+        self.assertIn("towerState === 'stale' && !p.egressSeen", js)
+
+    def test_pending_row_says_pending_not_no_baseline(self):
+        """基线还在，只是没确认。写成「无基线」会让人以为塔从来没扫过。"""
+        js = read(SHIELD / "web" / "shield.js")
+        self.assertIn("p.egressSeen && p.egressMask", js)
+        self.assertIn("· 待确认", js)
+
+    def test_tower_never_silently_overwrites_pending(self):
+        py = read(ROOT / "core" / "shield.py")
+        wb = py.split("def write_baseline", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('data["egressSeen"]', wb)
+        self.assertIn("def _clear_seen", py)
+        # 待确认期间不更新国家：那会让人以为基线已经跟过去了
+        self.assertIn('and not data.get("egressSeen")', wb)
+
+    def test_tower_webrtc_does_not_convict_on_a_pending_baseline(self):
+        app = read(ROOT / "app.py")
+        self.assertIn("pending=pending", app)
+        self.assertIn('bool(data.get("egressSeen"))', app)
+        bw = read(ROOT / "core" / "browserwebrtc.py")
+        self.assertIn("pending: bool = False", bw)
+        self.assertIn("出口变了，还没确认", bw)
 
 
 class IconTests(unittest.TestCase):

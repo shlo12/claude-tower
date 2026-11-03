@@ -249,6 +249,25 @@ def plan() -> dict:
     })
 
     try:
+        pd = proxyfix.dns_status()
+        dns_applied = bool(pd.get("canUndo"))
+    except Exception:
+        dns_applied = False
+    items.append({
+        "id": "proxydns",
+        "title": "恢复代理客户端的 DNS 解析器名单",
+        "paths": ["FlClash 设置（patchClashConfig.dns.nameserver）"] if dns_applied else [],
+        "size": 0,
+        "sizeText": "已改过" if dns_applied else "未改过",
+        "default": dns_applied,
+        "available": dns_applied,
+        "kind": "module",
+        "why": "nameserver 名单是直接写进客户端设置的。不恢复的话，卸载之后那份名单还在，"
+               "而记录「原来是什么」的 ~/.ccclean/proxydns-fix.json 已经被删掉，再也恢复不了。",
+        "danger": "只把 nameserver 恢复成改动前的那几条，不动其它设置。客户端会重启一次。",
+    })
+
+    try:
         pv = privacy.status()
         privacy_on = bool(pv.get("restoreAvailable"))
     except Exception:
@@ -401,13 +420,14 @@ def _warnings() -> list[str]:
 # ---------------------------------------------------------------- 执行
 
 
-_ORDER = ["proxyfix", "privacy", "ipv6", "stop", "launchagent",
+_ORDER = ["proxyfix", "proxydns", "privacy", "ipv6", "stop", "launchagent",
           "state", "runtime", "tower_app"]
 
 # 执行时只需要标题，不需要重新扫一遍磁盘。plan() 会去量应用包的体积，
 # 在真正动手之前再跑一遍纯属浪费——而且那会儿状态可能已经变了。
 _TITLES = {
     "proxyfix": "撤销写入代理客户端的规则",
+    "proxydns": "恢复代理客户端的 DNS 解析器名单",
     "privacy": "恢复 hosts 与 Claude Code 配置",
     "ipv6": "把 Wi-Fi 的 IPv6 恢复为 Automatic",
     "stop": "停止看门狗与哨兵",
@@ -447,6 +467,11 @@ def _run_one(item_id: str, item: dict) -> dict:
         res = proxyfix.apply("undo")
         return {"id": item_id, "title": title, "ok": bool(res.get("ok", True)),
                 "message": str(res.get("message") or "已撤销写入的规则")}
+
+    if item_id == "proxydns":
+        res = proxyfix.apply("dns-undo")
+        return {"id": item_id, "title": title, "ok": bool(res.get("ok", True)),
+                "message": str(res.get("message") or "已恢复 DNS 解析器名单")}
 
     if item_id == "privacy":
         res = privacy.apply(False)
