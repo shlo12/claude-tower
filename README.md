@@ -32,9 +32,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/shlo12/claude-tower/releases"><strong>下载应用 →</strong></a>　·　
+  <a href="https://github.com/shlo12/cc-tower/releases"><strong>下载应用 →</strong></a>　·　
   <a href="#quick-start">第一次使用</a>　·　<a href="#platforms">三端区别</a>　·　
-  <a href="https://github.com/shlo12/claude-tower/issues">反馈与建议</a>
+  <a href="https://github.com/shlo12/cc-tower/issues">反馈与建议</a>
 </p>
 
 ## 一次体检，一路值守
@@ -106,13 +106,15 @@
 <a id="download"></a>
 ## 下载与安装
 
-**[前往 Releases 下载应用包 →](https://github.com/shlo12/claude-tower/releases)**
+**[前往 Releases 下载应用包 →](https://github.com/shlo12/cc-tower/releases)**
 
 | 版本 | 怎么打开 | 需要知道 |
 | :--- | :--- | :--- |
 | macOS 11+ · Intel / Apple Silicon | 完整解压，打开 `CC Tower.app`，可拖入「应用程序」 | 自带 Python；ad-hoc 签名，未公证；改名前的老版本首次更新需手动装一次新包 |
 | macOS 虚拟机专用 | 使用明确标示为 VM 的专用包，按手册部署后验收 | 普通包不能代替固定链路保护；不要拿它改宿主机网络 |
 | Windows 11 x64 · Preview | 完整解压，双击 `Install.cmd` 创建快捷方式，或直接运行 `WindowsShield.exe` | 无需管理员权限；保留随包目录；监测接口和客户端仍需配置 |
+
+自动更新源如需配置，请填写 `shlo12/cc-tower`；默认仍为空，不会自动开启更新检查。
 
 源码当前为 **Tower 2.25.0 / macOS Shield 1.14.0 / Windows Shield 1.0.0 Preview**。下载包以 Releases 实际附件、版本和验收说明为准；主分支更新不会自动替换已有安装包。GitHub「Code → Download ZIP」下载的是源码。
 
@@ -197,7 +199,7 @@ python3 app.py
 
 ## 交流与反馈
 
-**[报告 Bug / 提出建议 →](https://github.com/shlo12/claude-tower/issues)**
+**[报告 Bug / 提出建议 →](https://github.com/shlo12/cc-tower/issues)**
 
 请说明系统与应用版本、复现步骤、预期和实际结果。截图与日志先脱敏；安全问题按 [安全说明](SECURITY.md) 私密反馈。
 
