@@ -1,5 +1,6 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const EMBEDDED_TOOLS = new URLSearchParams(location.search).get('panel') === '1';
 
 const SEV = {
   critical: { label: '高危', color: '#d92d20' },
@@ -63,6 +64,26 @@ function setScan(scan) {
   state.sel.clear();
   renderScan(scan);
   renderFindings();
+}
+
+/* 改完东西要重算分数。
+
+   塔的分数和「发现」列表都来自一次完整扫描。修完不重扫，界面就一直显示修
+   之前的结论——用户看到「时区还是不对」会以为没修上，然后去修一个已经修好
+   的问题。`/api/clean` 那条路早就是这么做的，这里补齐其余几张卡。
+
+   还有更要紧的一层：重扫会顺手把新状态写成哨兵的基线
+   （`_scan_cached(force=True)` 里调 `shield.write_baseline`）。不重扫的话，
+   用塔自己改完时区，哨兵的 `tzDrift` 立刻变成 true——它比的是「当前时区 vs
+   塔记的基线」，而基线还停在改之前。于是刚修好就被自己的哨兵报「先别启动
+   Claude」。改完就重扫，基线跟着走，这条误报不会出现。
+
+   不 await：重扫要十几秒，把按钮的恢复和 toast 一起卡住更难受。重扫期间
+   `Tower.reload` 自己会挂一个「重新探测中…」的小条，用户知道发生了什么。 */
+function rescanAfterFix() {
+  if (EMBEDDED_TOOLS && window.PanelTools) { window.PanelTools.rescan().catch(() => {}); return; }
+  if (!window.Tower || !window.Tower.reload) return;
+  try { Promise.resolve(window.Tower.reload(true)).catch(() => {}); } catch (e) { /* 重扫失败不影响已经成功的修复 */ }
 }
 
 function setUnlocked(u) {
@@ -130,6 +151,33 @@ function updatePickBar() {
 
 window.CC = { api, ccHeaders, token: CC_TOKEN, toast, esc, switchTab, setScan, setUnlocked, state, $, $$, fmtSize, shortPath, SEV, selectForClean, togglePick, updatePickBar, runWebrtcProbe };
 
+
+const TOOLS_ONLY = new URLSearchParams(location.search).get('tools') === '1';
+if (TOOLS_ONLY) {
+  document.body.classList.add('tools-only');
+  $('#brand .brand-name').textContent = '返回哨兵';
+  $('.primary-tabs [data-tab="privacy"]').textContent = '全部工具';
+  $('.primary-tabs [data-tab="tower"]').textContent = '魔塔闯关';
+  if (!EMBEDDED_TOOLS) {
+    document.body.classList.add('game-window');
+    for (const [name, label] of [['cruise','挑战历史'],['board','勇士榜']]) {
+      const button = document.createElement('button'); button.className = 'tab'; button.dataset.tab = name; button.textContent = label;
+      $('.primary-tabs').append(button);
+    }
+  }
+}
+window.CC.openToolView = function (view) {
+  const allowed = new Set(['privacy','settings','tower','privacy:proxyfix-dns-card','privacy:proxyfix-card']);
+  if (!allowed.has(view)) return;
+  const [tab, card] = view.split(':');
+  switchTab(tab);
+  if (history.replaceState) history.replaceState(null, '', '#' + view);
+  if (card) requestAnimationFrame(() => document.getElementById(card)?.scrollIntoView({block:'start',behavior:'smooth'}));
+};
+
+// 以前这里会在「被菜单栏面板嵌住」时给顶栏加一个「返回仪表盘」，靠的是
+// 探测 `shield` 通道。现在主界面是一扇独立窗口，它就是主界面——没有可以
+// 返回的上层，`shield` 通道也在，但那是给页面发动作用的，不是嵌在面板里。
 
 /* ============================================================ 扫描渲染 */
 
@@ -728,6 +776,7 @@ $('#privacy-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': privacyState.token },
       body: { action: privacyAction, confirm: true } });
     toast('持久设置已更新。请保存工作并重启 Claude。', 5000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 6500); }
   finally {
     privacyBusy = false;
@@ -768,6 +817,8 @@ async function saveNetcfg(value) {
   try {
     await api('/api/netcfg', { method: 'POST', body: { country: value } });
     toast(value ? `已记录预期出口国家 ${value.toUpperCase()}` : '已清除出口国家预期');
+    // 预期国家一变，「出口国家是否相符」那条判据的结论就变了
+    rescanAfterFix();
   } catch (e) { toast(e.message, 6000); }
   finally {
     netcfgBusy = false;
@@ -927,6 +978,7 @@ $('#align-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': alignState.token },
       body });
     toast(res.message || '已执行。', 9000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 9000); }
   finally {
     alignBusy = false;
@@ -1030,6 +1082,7 @@ $('#region-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': regionState.token },
       body });
     toast(res.message || '区域格式已更新。', 8000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 8000); }
   finally {
     regionBusy = false;
@@ -1129,6 +1182,7 @@ $('#shellproxy-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': shellproxyState.token },
       body: { action: 'apply', port, confirm: true } });
     toast(res.message || '已写入。', 9000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 9000); }
   finally {
     shellproxyBusy = false;
@@ -1147,6 +1201,7 @@ $('#shellproxy-undo').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': shellproxyState.token },
       body: { action: 'undo', confirm: true } });
     toast(res.message || '已撤销。', 9000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 9000); }
   finally {
     shellproxyBusy = false;
@@ -1175,8 +1230,8 @@ async function refreshIPv6() {
     const s = ipv6State;
     if (!s.supported) {
       $('#ipv6-badge').className = 'badge';
-      $('#ipv6-badge').textContent = '仅 macOS';
-      $('#ipv6-status').textContent = '此入口仅支持 macOS。';
+      $('#ipv6-badge').textContent = s.vmManaged ? '由 pf 管理' : '仅 macOS';
+      $('#ipv6-status').textContent = s.message || '此入口仅支持 macOS。';
       $('#ipv6-off').disabled = true;
       $('#ipv6-restore').disabled = true;
       return;
@@ -1260,6 +1315,7 @@ $('#ipv6-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': ipv6State.token },
       body: { action: ipv6Action, confirm: true } });
     toast(res.message || 'IPv6 设置已更新。', 6000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 7000); }
   finally {
     ipv6Busy = false;
@@ -1326,7 +1382,7 @@ async function refreshProxyfix() {
     $('#proxyfix-badge').className = 'badge' + (s.applied ? ' pass'
       : s.manual ? ' medium'
       : s.blocked && s.blocked.length ? ' medium' : '');
-    $('#proxyfix-badge').textContent = !s.supported ? '仅 macOS'
+    $('#proxyfix-badge').textContent = s.vmManaged ? '固定链路' : !s.supported ? '仅 macOS'
       : s.manual ? '需手动'
       : !s.available ? '不可用'
       : s.applied ? '已写入'
@@ -1449,6 +1505,7 @@ $('#proxyfix-confirm').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json', 'X-CClean-Privacy-Token': src.token },
       body: { action: proxyfixAction, confirm: true, portMode: proxyfixPortMode } });
     toast(res.message || '已更新。', 8000);
+    rescanAfterFix();
   } catch (e) { toast(e.message, 8000); }
   finally {
     proxyfixBusy = false;
@@ -1458,6 +1515,175 @@ $('#proxyfix-confirm').addEventListener('click', async () => {
     $('#proxyfix-cancel').disabled = false;
     await refreshProxyfix();
   }
+});
+
+/* ---- 终端时区 / 语言：写 shell 启动文件（免管理员） ---- */
+let shellenvState = null;
+
+async function refreshShellenv() {
+  const el = $('#shellenv-status');
+  if (!el) return;
+  try {
+    shellenvState = await api('/api/shellenv');
+    const s = shellenvState;
+    const t = s.target || {};
+    const blocked = (s.foreign || []).length > 0;
+    const srcLabel = { explicit: '你指定的', expected: '你设定的预期国家',
+      egress: '出口国家' }[t.source] || '出口国家';
+    $('#shellenv-target').textContent = t.resolved
+      ? `TZ=${t.timezone} · LANG=${t.lang}（按${srcLabel} ${t.country || '—'} 推出来的）`
+      : (s.message || '推不出目标值。先在「按出口对齐」里设定预期国家，或手动指定时区。');
+    const badge = $('#shellenv-badge');
+    badge.className = 'badge' + (s.applied ? ' pass' : blocked ? ' medium' : '');
+    badge.textContent = !s.supported ? '仅 macOS'
+      : s.applied ? '已写入'
+      : blocked ? '有冲突'
+      : t.resolved ? '未写入' : '缺目标值';
+    const line = [];
+    if (!s.supported) {
+      line.push(s.reason || '当前 shell 不支持代写。');
+    } else {
+      line.push(`启动文件：${s.file}${s.exists ? '' : '（还不存在，写入时新建）'}。`);
+      if (s.applied) {
+        const cur = Object.keys(s.block || {}).map((k) => `${k}=${s.block[k]}`).join(' · ');
+        line.push(`块内：${cur}。`);
+      }
+      if (blocked) {
+        line.push(`块外第 ${s.foreign.join('、')} 行已经有 TZ/LANG/LC_ALL，这里不会覆盖——`
+          + '两块配置谁生效不该由本工具替你决定。');
+      }
+      const env = s.env || {};
+      if (env.TZ || env.LANG) {
+        line.push(`当前终端：TZ=${env.TZ || '—'} LANG=${env.LANG || '—'}。`);
+      }
+      const sys = s.system || {};
+      line.push(`系统：${sys.timezone || '—'} · ${sys.locale || '—'}（这一层不动）。`);
+    }
+    el.textContent = line.join(' ');
+    $('#shellenv-apply').disabled = !s.canApply;
+    $('#shellenv-undo').disabled = !s.canUndo;
+    $('#shellenv-wrapper').disabled = !t.resolved;
+  } catch (e) {
+    el.textContent = e.message;
+    $('#shellenv-apply').disabled = true;
+    $('#shellenv-undo').disabled = true;
+    $('#shellenv-wrapper').disabled = true;
+  }
+}
+
+async function shellenvPost(action) {
+  if (!shellenvState) return;
+  const s = shellenvState;
+  const t = s.target || {};
+  if (action === 'apply') {
+    const ok = confirm(
+      `将把 TZ=${t.timezone}、LANG=${t.lang} 写进 ${s.file} 的标记块。\n\n` +
+      `这个终端里所有命令看到的时区都会变成 ${t.timezone}——date、git log 的\n` +
+      '时间戳会跟着走。系统时钟、日历、其他 App 不受影响。\n\n' +
+      '新开的终端生效；当前终端要 source 一下或重开。继续？');
+    if (!ok) return;
+  } else if (action === 'undo') {
+    if (!confirm('将从启动文件里移除本工具写的标记块，块外内容一个字不动。继续？')) return;
+  } else {
+    if (!confirm(`将生成 ${s.wrapper.path}，只在那一次运行里带上目标环境。继续？`)) return;
+  }
+  try {
+    const res = await api('/api/shellenv', {
+      method: 'POST',
+      headers: { 'X-CClean-Privacy-Token': s.token },
+      body: { action, confirm: true, country: t.country || '' },
+    });
+    toast(res.message || '已处理。', 8000);
+    // wrapper 只是生成一个启动器，没动任何被扫描的东西，不值得为它重扫十几秒
+    if (action !== 'wrapper') rescanAfterFix();
+  } catch (e) { toast(e.message, 8000); }
+  await refreshShellenv();
+  await refreshHistory();
+}
+
+$('#shellenv-apply').addEventListener('click', () => shellenvPost('apply'));
+$('#shellenv-undo').addEventListener('click', () => shellenvPost('undo'));
+$('#shellenv-wrapper').addEventListener('click', () => shellenvPost('wrapper'));
+
+/* ---- 最近操作 ---- */
+let historyToken = null;
+
+/* 记录页的空态：守护事件和写盘记录都没有时，两块空卡并成一句话。
+   只要有一边有内容就恢复成两张卡——只显示一半更像加载失败。 */
+function syncRecordsEmpty() {
+  const panel = document.getElementById('panel-records');
+  const guard = document.getElementById('guard-events');
+  const hist = document.getElementById('history-list');
+  if (!panel || !guard || !hist) return;
+  const empty = !guard.querySelector('.hist-event') && !hist.querySelector('.hist-item');
+  panel.classList.toggle('all-empty', empty);
+  const line = document.getElementById('records-empty');
+  if (line) line.hidden = !empty;
+}
+
+async function refreshHistory() {
+  const list = $('#history-list');
+  if (!list) return;
+  try {
+    const d = await api('/api/history?n=15');
+    historyToken = d.token;
+    const labels = d.labels || {};
+    const items = d.items || [];
+    $('#history-badge').textContent = items.length ? `${items.length} 条` : '暂无';
+    list.textContent = '';
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'hist-empty';
+      li.textContent = '还没有记录。本工具第一次写盘之后会出现在这里。';
+      list.appendChild(li);
+      return;
+    }
+    items.forEach((r) => {
+      const li = document.createElement('li');
+      li.className = 'hist-item' + (r.ok ? '' : ' bad');
+      const time = document.createElement('span');
+      time.className = 'hist-time';
+      time.textContent = String(r.ts || '').replace('T', ' ').slice(5);
+      const body = document.createElement('span');
+      body.className = 'hist-body';
+      const act = document.createElement('span');
+      act.className = 'hist-action';
+      act.textContent = labels[r.action] || r.action;
+      body.appendChild(act);
+      if (r.target) body.appendChild(document.createTextNode(' · ' + r.target));
+      if (r.detail) {
+        const det = document.createElement('div');
+        det.className = 'hist-detail';
+        det.textContent = r.detail;
+        body.appendChild(det);
+      }
+      const flag = document.createElement('span');
+      flag.className = 'hist-flag ' + (r.ok ? 'ok' : 'bad');
+      flag.textContent = r.ok ? 'OK' : '失败';
+      li.append(time, body, flag);
+      list.appendChild(li);
+    });
+  } catch (e) {
+    $('#history-badge').textContent = '读取失败';
+  } finally {
+    syncRecordsEmpty();
+  }
+}
+
+$('#history-refresh').addEventListener('click', refreshHistory);
+$('#history-clear').addEventListener('click', async () => {
+  if (!historyToken) await refreshHistory();
+  if (!historyToken) return;
+  if (!confirm('清空操作日志？只删记录，不影响已经做过的修改。')) return;
+  try {
+    const res = await api('/api/history', {
+      method: 'POST',
+      headers: { 'X-CClean-Privacy-Token': historyToken },
+      body: { action: 'clear', confirm: true },
+    });
+    toast(res.message || '已清空。');
+  } catch (e) { toast(e.message, 6000); }
+  await refreshHistory();
 });
 
 /* ---- 自动更新：检查 → 下载校验 → 用户确认后安装 ---- */
@@ -1564,7 +1790,7 @@ async function refreshUpdate(silent) {
     const s = await api('/api/update');
     renderUpdate(s);
     if (s.requested) {
-      if (!$('#panel-privacy').classList.contains('active')) switchTab('privacy');
+      if (!$('#panel-settings').classList.contains('active')) switchTab('settings');
       const card = $('#update-card');
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
       card.classList.remove('focus-flash');
@@ -1931,6 +2157,7 @@ $('#restore-list')?.addEventListener('click', async (e) => {
     const skipped = res.skipped || [];
     $('#restore-sum').textContent = res.message || '已还原';
     toast(res.ok ? (res.message || '已还原') : '没有可还原的内容', 3600);
+    if (res.ok) rescanAfterFix();
     if (skipped.length) {
       const box = $('#restore-list');
       box.insertAdjacentHTML('afterbegin',
@@ -1980,6 +2207,7 @@ $('#tz-apply')?.addEventListener('click', async (e) => {
     const r = await api('/api/timezone', { method: 'POST', body: { tz, confirm: true } });
     $('#tz-status').textContent = r.ok ? `已改为 ${r.tz}` : `未完成：${r.message}`;
     toast(r.ok ? '时区已生效' : r.message, 3000);
+    if (r.ok) rescanAfterFix();
   } catch (err) {
     $('#tz-status').textContent = err.message;
   } finally {
@@ -1998,16 +2226,48 @@ $('#checklist').addEventListener('click', (e) => {
   syncChecklist();
 });
 
+/* 二级名字 → 它所属的一级页。合并页里这个名字同时是「页内视图」名。 */
+const GROUP_OF = { settle: 'tower', findings: 'tower', checklist: 'tower',
+                   isolation: 'privacy', cruise: 'records', board: 'records' };
+/* 视图名 → 它画在哪个面板里。没列出的自己就是一面板。 */
+const PANEL_OF = { settle: 'results', findings: 'results',
+                   isolation: 'privacy', cruise: 'records', board: 'records' };
+/* 合并页里的视图都算同一个页签：按类归到「全塔结算」。 */
+const TAB_OF = { findings: 'settle' };
+
 function switchTab(name) {
-  if (GATED_TABS.has(name) && state.unlocked === false) {
+  if (TOOLS_ONLY && !EMBEDDED_TOOLS && ['privacy','settings','findings','isolation','checklist','records'].includes(name) && window.webkit?.messageHandlers?.host) {
+    window.webkit.messageHandlers.host.postMessage({action:'open-tools'});
+    return;
+  }
+  if (!EMBEDDED_TOOLS && GATED_TABS.has(name) && state.unlocked === false) {
     toast('先下塔闯过至少一关，这片区域才会开放');
     name = 'tower';
   }
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
-  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + name));
+  const group = TOOLS_ONLY && !EMBEDDED_TOOLS && ['cruise','board'].includes(name) ? name : (GROUP_OF[name] || name);
+  const panel = PANEL_OF[name] || name;
+  const tab = TAB_OF[name] || name;
+  $$('.primary-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === group));
+  $$('.sub-tabs').forEach(n => { n.hidden = n.dataset.group !== group; });
+  $$('.sub-tabs .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  if (window.Tower && Tower.hideTitle) Tower.hideTitle();
+  $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + panel));
+  // 合并页里只显示当前这一种看法。别的面板里同名视图留着不动，
+  // 反正整个面板都不可见——按面板扫会多一次无谓的 DOM 写。
+  $$('.panel.active .view').forEach(v => { v.hidden = v.id !== 'view-' + name; });
+  $$('.panel.active .viewseg').forEach(seg => {
+    $$('button', seg).forEach(b => {
+      const on = b.dataset.view === name;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  });
   if (history.replaceState) history.replaceState(null, '', '#' + name);
   window.scrollTo({ top: 0, behavior: 'smooth' });
-  if (name === 'privacy') { refreshPrivacy(); refreshNetcfg(); refreshAlign(); refreshRegion(); refreshShellproxy(); refreshIPv6(); refreshProxyfix(); loadUninstall(); refreshUpdate(); }
+  if (name === 'privacy') { refreshPrivacy(); refreshNetcfg(); refreshAlign(); refreshRegion(); refreshShellproxy(); refreshIPv6(); refreshProxyfix(); refreshShellenv(); refreshHistory(); refreshSessionApi(); loadUninstall(); refreshUpdate(); }
+  if (name === 'settings') { refreshUpdate(); loadUninstall(); refreshSessionApi(); }
+  if (name === 'records') refreshHistory();
+  if (window.Guard && ['settings','records'].includes(name)) Guard.refresh();
   if (name === 'isolation') loadProfiles();
   if (name === 'findings') { loadEgress(); loadBackups(); loadTz(); }
   if (name === 'tower' && window.Tower) Tower.refresh();
@@ -2017,9 +2277,13 @@ function switchTab(name) {
 }
 
 $$('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+// 分段控件切换的是「这一页的另一种看法」，走同一个 switchTab。
+$$('.viewseg button').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.view)));
 
 $('#brand').addEventListener('click', () => {
-  if (window.Tower && Tower.showTitle) Tower.showTitle();
+  if (TOOLS_ONLY && window.webkit?.messageHandlers?.host) {
+    window.webkit.messageHandlers.host.postMessage({action:'show-monitor'});
+  } else { switchTab('tower'); }
 });
 
 /* ============================================================ 启动 */
@@ -2031,6 +2295,7 @@ $('#brand').addEventListener('click', () => {
     const disc = $('#disclaimer');
     if (disc) disc.textContent = meta.disclaimer;
   } catch (_) {}
+  if (EMBEDDED_TOOLS) return;
   loadChecklist();
   loadProfiles();
   // 哨兵面板的「去塔里更新」留了一个请求标记，进来就读一次，
@@ -2039,5 +2304,37 @@ $('#brand').addEventListener('click', () => {
   startUpdatePoll();
   const hash = (location.hash || '').replace('#', '');
   const tabName = hash.split(':')[0];
-  if (tabName && document.getElementById('panel-' + tabName)) switchTab(tabName);
+  if (TOOLS_ONLY) window.CC.openToolView(hash || 'privacy');
+  // 合并页里的视图名没有同名面板（settle 现在画在 panel-results 里），
+  // 所以先按 PANEL_OF 折算，再判断这一页存不存在。
+  else if (tabName && document.getElementById('panel-' + (PANEL_OF[tabName] || tabName))) switchTab(tabName);
+  // 没有 hash 时以前什么都不做，靠 HTML 里 panel-home 的 active 兜底。
+  // 守护台搬回菜单栏之后默认页变成魔塔体检，得主动切一次——否则
+  // Tower.refresh() 不会被调用，页面停在空壳上。
+  else switchTab('tower');
 })();
+
+// 本机控制接口：独立令牌与确认，不依赖其他卡片读取成功。
+let sessionApiState = null;
+async function refreshSessionApi() {
+  try {
+    sessionApiState = await api('/api/sessionapi');
+    $('#sessionapi-status').textContent = sessionApiState.message;
+    $('#sessionapi-enable').disabled = !sessionApiState.canApply;
+    $('#sessionapi-undo').disabled = !sessionApiState.canUndo;
+  } catch (e) { $('#sessionapi-status').textContent = '读取失败：' + e.message; }
+}
+async function changeSessionApi(action) {
+  if (!sessionApiState) return;
+  const text = action === 'apply' ? '将为 FlClash 开启仅限本机的控制接口并配置随机密钥。此接口具备改配置能力，哨兵只做读取。操作会重启代理并短暂断网，请先退出 Claude。确认继续？' : '恢复本工具创建接口前的设置，会重启 FlClash 并短暂断网。确认继续？';
+  if (!confirm(text)) return;
+  $('#sessionapi-enable').disabled = true;
+  $('#sessionapi-undo').disabled = true;
+  try {
+    const result = await api('/api/sessionapi', {method: 'POST', headers: {'X-CClean-Privacy-Token': sessionApiState.token}, body: {action, confirm: true}});
+    toast(result.message, 8000);
+  } catch (e) { toast(e.message, 8000); }
+  await refreshSessionApi();
+}
+$('#sessionapi-enable').addEventListener('click', () => changeSessionApi('apply'));
+$('#sessionapi-undo').addEventListener('click', () => changeSessionApi('undo'));

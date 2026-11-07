@@ -1,5 +1,6 @@
 /* 魔塔 · 像素闯关前端 */
 (function () {
+  if (new URLSearchParams(location.search).get("panel") === "1") return;
   const { api, ccHeaders, toast, esc, switchTab } = window.CC;
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -281,8 +282,8 @@
     if (titleVisible()) renderMenu();
     render();
     renderBoard(d.board);
-    const settlePanel = $('#panel-settle');
-    if (settlePanel && settlePanel.classList.contains('active')) renderSettle();
+    const settleView = $('#view-settle');
+    if (settleView && !settleView.hidden) renderSettle();
   }
 
   /* ---------------------------------------------------------- 渲染 */
@@ -1903,12 +1904,13 @@
     return (T.settle.failed || []).map((x) => {
       const lv = cur.get(x.id);
       const done = !!(lv && lv.ok);
+      const dismissed = !!(lv && lv.dismissed);
       const fixIds = done ? [] : (x.fixIds || []).filter((id) => fixable.has(id));
       const fixItems = fixIds.map((id) => ({ id, title: (scanItems.get(id) || {}).title || id }));
       const target = !done && !fixIds.length
         ? (x.id === '4-1' ? 'isolation' : '')
         : '';
-      return { ...x, done, fixIds, fixItems, target };
+      return { ...x, done, dismissed, fixIds, fixItems, target };
     });
   }
 
@@ -1986,7 +1988,7 @@
       }
       const how = howArr.join(' · ');
       const fixNames = x.fixItems.map((f) => `<em title="${esc(f.id)}">${esc(f.title)}</em>`).join('');
-      return `<article class="st-issue${x.done ? ' done' : ''}">
+      return `<article class="st-issue${x.done ? ' done' : ''}${x.dismissed ? ' dismissed' : ''}">
         <div class="st-check">${x.done
           ? '<span class="st-check-done">✓</span>'
           : x.fixIds.length
@@ -1996,7 +1998,7 @@
           <div class="st-issue-head">
             <span class="br-sev s-${esc(x.sev || 'info')}">${sevLabel(x.sev)}</span>
             <b>${esc(x.id)} ${esc(x.title)}</b>
-            ${x.done ? '<span class="st-done">已修复</span>' : ''}
+            ${x.dismissed ? '<span class="st-done st-dismissed">已忽略</span>' : x.done ? '<span class="st-done">已修复</span>' : ''}
           </div>
           <i class="st-meta">第 ${esc(x.floorNo)} 层 · ${esc(x.floorName || '')} · ${esc(x.monster ? x.monster.name : '')}</i>
           <p class="st-value">${esc(x.value || '')}</p>
@@ -2014,6 +2016,8 @@
               ${!x.done && x.act && x.act.kind === 'openfile' ? `<button class="st-link" data-settle-action="openfile" data-file="${esc(x.act.file || '')}">${esc(x.act.label || '打开文件')}</button>` : ''}
               ${!x.done && x.act && x.act.kind === 'probe' ? `<button class="st-link" data-settle-action="probe">${esc(x.act.label || '在本机浏览器里实测')}</button>` : ''}
               ${x.target === 'isolation' ? '<button class="st-link" data-settle-action="goto" data-tab="isolation">去建隔离配置档</button>' : ''}
+              ${!x.done ? `<button class="btn sm ghost st-dismiss" data-settle-action="dismiss" data-id="${esc(x.id)}" data-title="${esc(x.title)}">我已知晓，忽略此项</button>` : ''}
+              ${x.dismissed ? `<button class="btn sm ghost st-restore" data-settle-action="restore" data-id="${esc(x.id)}">恢复关注</button>` : ''}
               ${!x.done && !x.fixIds.length && !x.target && !x.act ? '<span class="st-manual-tip">按建议手动处理</span>' : ''}
             </div>
           </div>
@@ -2238,7 +2242,24 @@
       else toast('页面还没准备好，刷新后再试');
       return;
     }
-    if (act === 'goto') { jumpToAct(el.dataset.tab, el.dataset.focus); }
+    if (act === 'goto') { jumpToAct(el.dataset.tab, el.dataset.focus); return; }
+    if (act === 'dismiss' || act === 'restore') { dismissIssue(el, act); }
+  }
+
+  async function dismissIssue(el, act) {
+    const id = el.dataset.id, title = el.dataset.title || id;
+    if (act === 'dismiss' && !confirm(
+      `确认已知晓「${id} ${title}」的风险？\n\n` +
+      '忽略后这一关不再拦路：结算、通关与封印都当它通过。\n' +
+      '但每次扫描仍会真实检测——结果变了也会如实显示，只是不拦你；随时能在这里恢复关注。')) return;
+    try {
+      await api('/api/tower/dismiss', { method: 'POST', body: { id, action: act } });
+      toast(act === 'dismiss' ? `已忽略「${title}」，本关不再拦路` : `已恢复关注「${title}」`);
+      await load(false);
+      renderSettle();
+    } catch (e) {
+      toast(e.message || '操作失败');
+    }
   }
 
   const QUICK_TZ = {
@@ -2340,7 +2361,7 @@
     } finally {
       T.tourBusy = false;
       renderSettle();
-      if ($('#panel-cruise') && $('#panel-cruise').classList.contains('active')) renderCruise();
+      if ($('#panel-records')?.classList.contains('active') && !$('#view-cruise').hidden) renderCruise();
     }
   }
 
@@ -2879,7 +2900,7 @@
       });
       offset += g[0].length + gap;
     });
-    return `<svg class="t-word" viewBox="0 0 ${cols} 7" shape-rendering="crispEdges" aria-hidden="true">
+    return `<svg class="t-word" style="width:${(cols / 35 * 100).toFixed(2)}%" viewBox="0 0 ${cols} 7" shape-rendering="crispEdges" aria-hidden="true">
       <g class="word-shadow" transform="translate(.7 .7)">${cells}</g>
       <g class="word-face">${cells}</g>
     </svg>`;
@@ -2906,7 +2927,7 @@
       { act: 'board', label: '勇士榜' },
       { act: 'privacy', label: '遥测隐私设置' },
       { act: 'camp', label: '勇士营地' },
-      { act: 'quit', label: '退出游戏' },
+      { act: 'quit', label: '返回守护台' },
     ];
   }
 
@@ -2938,7 +2959,7 @@
     document.body.classList.remove('camp-on');
     document.body.classList.add('title-on');
     if (!$('#t-tower').innerHTML) $('#t-tower').innerHTML = pixelArt(TOWER_ART);
-    if (!$('#t-logo-art').innerHTML) $('#t-logo-art').innerHTML = pixelWord('CLAUDE') + pixelWord('TOWER');
+    if (!$('#t-logo-art').innerHTML) $('#t-logo-art').innerHTML = pixelWord('CC') + pixelWord('TOWER');
     makeStars();
     makeEmbers();
     tSel = 0;
@@ -3021,9 +3042,8 @@
       return;
     }
     if (act === 'quit') {
-      try { await api('/api/quit', { method: 'POST', body: {} }); } catch (_) {}
-      $('#t-panel').hidden = true;
-      $('#t-bye').hidden = false;
+      hideTitle();
+      switchTab('tower');
     }
   }
 
@@ -3123,11 +3143,12 @@
     refreshSettle,
     refreshCruise,
     showTitle,
+    hideTitle,
     autoRun,
   };
 
   // #tower:<id> 深链直达关卡（验收用），其余情况都停在标题画面
-  if (!/^#tower:.+/.test(BOOT_HASH)) showTitle();
+  // 主窗口默认进入守护台，魔塔标题由体检页主动打开。
 
   // 版本号以后端为准，避免 HTML / app.py / Info.plist 三处手改后对不上
   fetch('/api/meta', { headers: ccHeaders() }).then((r) => r.json()).then((d) => {

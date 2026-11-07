@@ -1,7 +1,9 @@
 import Darwin
 import Foundation
 
-// Claude Shield 的进程外看门狗。
+UserEnvironment.normalizeCurrentProcess()
+
+// CC Shield 的进程外看门狗。
 //
 // 哨兵崩溃或被 kill -9 时，菜单栏图标会一起消失——用户通常要等到下次
 // 打开塔才发现「这段时间没人守」。这个进程只做一件事：每 10 秒读一次
@@ -51,7 +53,7 @@ func parseOptions() -> Options {
         i += 1
     }
     if opts.app == nil {
-        // .../Claude Shield.app/Contents/MacOS/ShieldWatchdog
+        // .../CC Shield.app/Contents/MacOS/ShieldWatchdog
         let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         let app = own.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         if app.pathExtension == "app" {
@@ -160,6 +162,7 @@ func notify(_ title: String, _ body: String) {
 func relaunch() -> Bool {
     if let script = opts.relaunch {
         let p = Process()
+        p.environment = UserEnvironment.child
         p.executableURL = URL(fileURLWithPath: script)
         p.arguments = ["--restored"]
         p.standardOutput = FileHandle.nullDevice
@@ -178,6 +181,7 @@ func relaunch() -> Bool {
     }
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    p.environment = UserEnvironment.child
     p.arguments = ["-a", app.path, "--args", "--restored"]
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
@@ -258,7 +262,7 @@ while true {
                 }
             }
             if !toldCrash {
-                notify("哨兵意外退出了", "看门狗正在重新拉起 Claude Shield。")
+                notify("哨兵意外退出了", "看门狗正在重新拉起 CC Shield。")
                 toldCrash = true
             }
             if now - lastLaunch >= 30 {
@@ -267,7 +271,7 @@ while true {
                 if relaunch() {
                     log("relaunch attempt \(attempts)")
                 } else if attempts >= 3 && !toldFailure {
-                    notify("哨兵没能重新启动", "请手动打开 Claude Shield。")
+                    notify("哨兵没能重新启动", "请手动打开 CC Shield。")
                     toldFailure = true
                 }
             }

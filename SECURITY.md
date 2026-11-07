@@ -1,6 +1,6 @@
 # 安全说明
 
-Claude Tower 是一个**在本机运行、只读为主**的检测与清理工具：它读你登录账户能看到的东西，给出一份带严重度的清单，改动都需要你逐步确认。这份文档说明它的威胁模型、数据边界，以及哪些事它做不到。
+CC Tower 是一个**在本机运行、只读为主**的检测与清理工具：它读你登录账户能看到的东西，给出一份带严重度的清单，改动都需要你逐步确认。这份文档说明它的威胁模型、数据边界，以及哪些事它做不到。
 
 ---
 
@@ -46,11 +46,20 @@ Claude Tower 是一个**在本机运行、只读为主**的检测与清理工具
 | STUN 探测 | 发往公共 STUN 节点 | **是**，UDP 探测，不带身份 |
 | 出口历史 | `~/.ccclean/egress.json`（最多 60 条） | 否，删掉即清零 |
 | 分流修复记录 | `~/.ccclean/proxyfix.json`（0600） | 否 |
+| 终端环境记录与启动器 | `~/.ccclean/shellenv.json`（0600）、`~/.ccclean/bin/claude-env`（0755） | 否，保存目标时区与语言 |
+| 操作日志 | `~/.ccclean/history.jsonl`（0600） | 否，保存时间、操作与结果 |
+| 本机节点监测恢复记录 | `~/.ccclean/session-api.json`（0600） | 否，仅端口、字段存在性和密钥摘要；密钥只在客户端配置中，节点选择摘要与完整会话出口仅在哨兵内存中 |
+| DNS 修复记录 | `~/.ccclean/proxydns-fix.json`（0600） | 否，保存恢复所需的解析器名单 |
 | 区域格式记录 | `~/.ccclean/region.json`（0600） | 否 |
 | 定位服务缓存 | `~/.ccclean/location.json`（0600，只存开/关与时间，七天过期） | 否 |
 | 终端代理记录与备份 | `~/.ccclean/shellproxy.json`、`~/.ccclean/backups/rc-*`（均 0600） | 否，副本移除已识别密钥赋值；无法安全脱敏时不生成副本 |
 | 出口对齐恢复记录 | `~/.ccclean/align.json`（0600，仅原设置与目标值） | 否 |
 | 备份副本 | `~/.ccclean/backups/` | 否；敏感内容（缓存、日志、密钥与令牌）**不留副本** |
+| 主窗口指令与回执 | `~/.ccclean/shield-command.json`、`shield-command-result.json`（0600） | 否，仅随机请求 ID、时间与有限动作；不含命令行或节点信息 |
+| 状态互斥锁 | `~/.ccclean/shield-state.lock`、`shield-maintenance.lock`、`shield-command.lock`（0600） | 否，协调跨进程读合并写与维修／会话启动互斥 |
+| 虚拟机固定链路策略 | `/usr/local/etc/ccclean-vm-network.json`（root:600） | 否，保存批准端点及配置/节点/规则摘要，不复制代理密钥 |
+| 虚拟机网络证明 | `/var/run/ccclean-vm-network.json`（root:644） | 否，仅状态、时间与摘要；应用拒绝过期或其他用户可写的文件 |
+| 虚拟机保护任务 | `com.ccclean.vm-network`，root 每 10 秒核验 mihomo 与 pf | 不依赖界面常开；不访问外部遥测服务，不修改宿主机网络 |
 | 哨兵状态与日志 | `~/.ccclean/shield.json`、`shield.log`（0600） | 否 |
 
 **展示脱敏不等于本地文件全部脱敏**：页面中的出口历史与导出报告会进行打码处理；用于比较出口变化的 `egress.json` 保存原始 IP、国家、城市和 ASN。备份与其他本地记录也应视为私有资料，不要直接公开整个 `.ccclean` 目录。
@@ -64,7 +73,12 @@ Claude Tower 是一个**在本机运行、只读为主**的检测与清理工具
 1. **Host / Origin 校验** —— 挡 DNS 重绑定：攻击者可以让 `evil.com` 解析到 127.0.0.1，但浏览器发来的 `Host` 会是 `evil.com`。
 2. **会话令牌** —— 每次启动生成的随机值，注入页面 `<meta>`，前端每个请求带 `X-CClean-Token`。用自定义头而不是 cookie，是因为自定义头会强制预检，而服务端不实现 `OPTIONS`——跨站页面连「悄悄替你点一下」都做不到。
 
-改动类接口（`/api/privacy`、`/api/ipv6`、`/api/proxyfix`、`/api/region`）另有一枚专用令牌 `X-CClean-Privacy-Token`，并且要求 `confirm: true`。相关校验在 `app.py` 的对应接口中执行。
+改动类接口（`/api/privacy`、`/api/ipv6`、`/api/proxyfix`、`/api/region`、`/api/align`、`/api/shellproxy`、`/api/shellenv`、`/api/history`、`/api/sessionapi`，以及授权读取定位的 `/api/probe/location`）另有一枚专用令牌 `X-CClean-Privacy-Token`，并且要求 `confirm: true`。这些要求针对执行改动的 POST；状态 GET 只读且受本地来源校验，`/api/location` 返回定位缓存，实际授权读取由 `/api/probe/location` 触发。相关校验在 `app.py` 的对应接口中执行。
+
+
+统一主窗口的 `/api/control` 使用相同 Host / Origin 校验和 `X-CClean-Token`；POST 还要求 `confirm: true`。Python 只发有限动作，由原生哨兵统一处理；私有请求文件要求当前用户所有、普通文件、无组/其他用户权限、UUID、15 秒内时间戳及动作白名单。回执只表示已接收，不表示准入成功。同一用户的恶意进程不在此机制的防护边界内。
+
+维护窗口读取哨兵状态时，以哨兵进程实际存在且巡检时间不超过 45 秒为新鲜状态。日常仅显示菜单栏弹出面板，由原生直接推送，不创建独立日常窗口或状态副本。戒严会话中或状态未确认时，环境维修接口拒绝执行；结束请求发出但 Claude 尚未退出时仍不能维修。原生哨兵与按需启动的维护宿主、诊断引擎分别运行，诊断引擎停止不会退出哨兵。
 
 ---
 
@@ -103,3 +117,20 @@ AppleLocale 走 `defaults write -g`（用户域）；分流修复只写受支持
 - **内置运行时**：macOS 应用包里的解释器随包分发；Windows 分发包里的运行时是 python.org 官方的 embeddable 包，版本写在 `tools/python-runtime-win.sh`，来源 URL 就在脚本里。
 - **更新包校验**：下载后逐项核对体积、SHA256、版本号与代码签名，四项全过才允许安装；安装前备份当前版本，新版起不来会自动回滚。
 - **更新源是你自己的仓库**：填别人的 repo 等于把安装包来源交给对方。校验只能保证「下载的东西和清单一致」，保证不了「清单本身可信」。
+
+
+戒严使用前准入由用户点击「检查并启动」触发，关键证据缺失不放行；运行期间按周期核对实际模式、可读取节点选择链、配置摘要与精确出口。观察到变化或证据失效后撤销准入并请求退出桌面端，两秒后仍未退出时尝试强制终止。仅能对观察到的变化作出反应，系统自行启动仍有事后拦截窗口，不是防火墙或零泄漏保证。浏览器标签页和独立 CLI 不受桌面进程会话管理。
+
+FlClash 本机监测接口仅在用户确认后创建，绑定 127.0.0.1 随机端口并配置随机密钥（已有密钥保留）。该接口本身具备修改代理配置能力，工具仅发送 GET /configs、GET /proxies。密钥不得公开；哨兵拒绝远端控制地址与HTTP重定向。已有接口不覆盖；撤销前验证仍是本工具创建的入口，冲突时保留恢复记录。
+
+维护窗口通过固定的 `--tools` 参数按需启动；哨兵仅通过宿主偏好域传递白名单视图（工具、设置、魔塔和固定修复位置），不传任意命令、路径、节点或密钥。普通打开主应用只唤起原生哨兵，不启动 Python 引擎。
+
+菜单栏工具子页通过宿主 `--service` 启动无窗口引擎；runtime 除 Python PID 外记录其父宿主 PID。哨兵仅接受匹配宿主、仍存活、HTTP 127.0.0.1:8787–8800 的本地根地址，使用原有来源与会话令牌访问控制。工具子页复用原操作绑定，读取状态不执行修改；POST/DELETE 期间禁用返回。系统确认框或面板收起不终止写入；用户返回哨兵后只停止本次创建的引擎，不终止已经存在的其他宿主。
+
+嵌入维护页的原生桥只接受主 frame：签名包内的本地面板、已校验工具引擎的 loopback origin，或原生加载页的固定返回动作。外部链接交给默认浏览器，不在带原生桥的 WKWebView 中导航。
+
+## Windows 原生哨兵（测试版）
+
+Windows Shield 1.0.0 独立于 macOS 状态文件：设置位于 `%LOCALAPPDATA%\CCTower\Shield\settings.dpapi`，以当前用户 DPAPI 加密，未保存明文副本；`events.log` 及至多一个轮换文件只记固定操作原因和时间。节点与完整出口仅在内存。DPAPI 不防当前用户上下文中的恶意软件。开机自启只在用户主动启用后写入 HKCU Run。
+
+仅访问数字回环 HTTP 控制 API，密钥不发往公网。HTTPS 与 STUN 探测目标和数据边界见 [Windows 手册](windows/README.md)。不关闭证书校验，启动目标需要有效 Authenticode 签名及 Anthropic 发布者；结束进程校验精确路径与启动时间。周期检测不是系统防火墙，不覆盖浏览器／CLI 和全部连接；本次构建尚未经过 Windows 11 实机验收。

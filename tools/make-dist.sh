@@ -1,10 +1,10 @@
 #!/bin/sh
 # 打一个能直接发给别人的分发包
-#   产物：dist/ClaudeTower-<版本>-macOS/  以及同名 .zip
+#   产物：dist/CCTower-<版本>-macOS/  以及同名 .zip
 #
-# 命名跟 Windows 源码包对齐（ClaudeTower-<版本>-windows-src），
+# 命名跟 Windows 源码包对齐（CCTower-<版本>-windows-src），
 # 两个包在 dist/ 里排在一起，版本号在最显眼的位置——
-# 以前 macOS 叫「Claude Tower 2.8.0」、Windows 叫「ClaudeTower-windows-src-v2.9.4」，
+# 以前 macOS 叫「CC Tower 2.8.0」、Windows 叫「CCTower-windows-src-v2.9.4」，
 # 一眼看不出谁新谁旧，发错版本是迟早的事。
 set -eu
 
@@ -12,7 +12,7 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VER="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$DIR/app.py" | head -n 1)"
 [ -n "${VER:-}" ] || { echo "✗ 读不到 app.py 里的 VERSION"; exit 1; }
 
-NAME="ClaudeTower-$VER-macOS"
+NAME="CCTower-$VER-macOS"
 DIST="$DIR/dist"
 STAGE="$DIST/$NAME"
 ZIP="$DIST/$NAME.zip"
@@ -33,14 +33,14 @@ fi
 mkdir -p "$STAGE"
 
 # ditto 才能保住签名、图标资源和扩展属性；cp -R 会把签名弄坏
-ditto "$DIR/Claude Tower.app" "$STAGE/Claude Tower.app"
+ditto "$DIR/CC Tower.app" "$STAGE/CC Tower.app"
 install -m 755 "$DIR/tools/首次打开.command" "$STAGE/① 首次打开.command"
 install -m 644 "$DIR/tools/使用说明.txt"     "$STAGE/② 使用说明.txt"
 
 # 校验：签名没被 ditto 弄坏，架构还是两个
-codesign --verify --deep --strict "$STAGE/Claude Tower.app" 2>/dev/null \
+codesign --verify --deep --strict "$STAGE/CC Tower.app" 2>/dev/null \
   && echo "  签名校验：通过" || echo "  ⚠ 签名校验未通过（不影响本机，但对方可能要多点一次）"
-lipo -info "$STAGE/Claude Tower.app/Contents/MacOS/CCclean" | sed 's/^/  /'
+lipo -info "$STAGE/CC Tower.app/Contents/MacOS/CCclean" | sed 's/^/  /'
 
 echo
 echo "→ 压缩"
@@ -80,8 +80,8 @@ echo "  路径：$ZIP"
 
 # dist/ 里留着旧版本时提醒一句：很容易把过期的那个发出去
 # 同版本的另一平台包（windows-src）不算「旧版本」，所以按版本号而不是包名比
-OLD="$(ls -1 "$DIST" 2>/dev/null | grep -E '^ClaudeTower-.*-(macOS|windows-src)(\.zip)?$' \
-       | grep -v -F "ClaudeTower-$VER-" || true)"
+OLD="$(ls -1 "$DIST" 2>/dev/null | grep -E '^CCTower-.*-(macOS|windows-src)(\.zip)?$' \
+       | grep -v -F "CCTower-$VER-" || true)"
 if [ -n "$OLD" ]; then
   echo
   echo "  ⚠ dist/ 里还有别的版本，别发错了："

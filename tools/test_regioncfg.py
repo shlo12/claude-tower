@@ -18,6 +18,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import regioncfg
 
 
+def setUpModule():
+    """测试绝不能写用户的真实操作日志——那是用户唯一的一份回溯依据。"""
+    global _HIST_PATCH, _HIST_TMP
+    import tempfile
+    from unittest import mock
+    from core import history
+    _HIST_TMP = tempfile.mkdtemp()
+    _HIST_PATCH = mock.patch.object(history, "LOG",
+                                    __import__("pathlib").Path(_HIST_TMP) / "history.jsonl")
+    _HIST_PATCH.start()
+
+
+def tearDownModule():
+    _HIST_PATCH.stop()
+
+
 class FakeDefaults:
     """替身：只认 read/write -g AppleLocale 这两条命令，别的都不该出现。"""
 

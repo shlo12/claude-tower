@@ -68,6 +68,7 @@ enum Watchdog {
     private static func launch(_ exe: URL) {
         guard !stopping else { return }
         let p = Process()
+        p.environment = UserEnvironment.child
         p.executableURL = exe
         p.arguments = [
             "--dir", Store.dir.path,

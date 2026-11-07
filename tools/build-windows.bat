@@ -1,40 +1,18 @@
 @echo off
-rem ============================================================
-rem  Claude Tower · Windows 免安装打包脚本
-rem  在 Windows 机器上运行：产出 dist\Claude Tower.exe（双击即用，无需装 Python）
-rem  需要：本机装有 Python 3.9+ 和 PyInstaller
-rem ============================================================
-cd /d "%~dp0.."
-
-where python >nul 2>nul
+setlocal
+set "TASK_ROOT=%~dp0.."
+cd /d "%TASK_ROOT%"
+rem Build the native tray app with the Windows system compiler. No pip install.
+call windows\shield\build.cmd
 if errorlevel 1 (
-    echo [x] 需要先安装 Python 3.9+（微软商店可装）
-    pause
+    echo Native Shield compilation failed. Windows .NET Framework 4.8 is required.
     exit /b 1
 )
-
-python -m pip install --quiet pyinstaller 2>nul
-if errorlevel 1 (
-    echo [x] PyInstaller 装不上，检查网络后重试
-    pause
-    exit /b 1
-)
-
-python -m PyInstaller --noconfirm --clean ^
-    --onefile --noconsole ^
-    --name "Claude Tower" ^
-    --add-data "web;web" ^
-    --icon NONE ^
-    app.py
-
-if errorlevel 1 (
-    echo [x] 打包失败
-    pause
-    exit /b 1
-)
-
-echo.
-echo   √ 完成：dist\Claude Tower.exe
-echo   把它发给朋友，双击就能跑，不用装 Python。
-echo.
-pause
+cd /d "%TASK_ROOT%"
+if not exist build\windows mkdir build\windows
+copy /y windows\shield\WindowsShield.exe build\windows\WindowsShield.exe >nul
+copy /y windows\shield\WindowsShield.exe WindowsShield.exe >nul
+powershell.exe -NoProfile -NonInteractive -Command "$r=Join-Path $env:TEMP 'claude-shield-self-test.json'; $p=Start-Process '.\WindowsShield.exe' -ArgumentList ('--self-test '+[char]34+$r+[char]34) -Wait -PassThru; if($p.ExitCode -ne 0){exit 1}; $s=Get-Content -Raw $r|ConvertFrom-Json; $s|ConvertTo-Json; if(-not $s.ok){exit 1}"
+if errorlevel 1 exit /b 1
+echo WindowsShield.exe is ready. The Python tools still require the bundled runtime.
+exit /b 0

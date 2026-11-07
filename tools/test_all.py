@@ -21,6 +21,14 @@ TOOLS = ROOT / "tools"
 
 # (脚本, 说明, 是否属于「快」)
 SUITES = [
+    ("test_user_environment.py", "原生启动 HOME 修复与隔离环境保留", True),
+    ("test_vm_transfer.py", "宿主传档：校验、收件权限与中断清理", True),
+    ("test_vm_network.py", "虚拟机固定链路、默认拒绝与证据有效期", True),
+    ("test_tool_service.py", "面板内工具无窗口引擎", True),
+    ("test_control.py", "统一守护状态与指令通道", True),
+    ("test_strict_session.py", "戒严准入与节点会话身份", True),
+    ("test_panel_geometry.py", "面板落点（贴边/副屏/窄屏）", True),
+    ("test_sessionapi.py", "本机节点监测接口写入与撤销", True),
     ("test_release_hygiene.py", "发布卫生规则", True),
     ("check.py", "冒烟检查：地图/关卡/判定/打包/接线", True),
     ("test_restore.py", "备份还原", True),
@@ -43,6 +51,9 @@ SUITES = [
     ("test_uatraits.py", "UA 里的国产浏览器与设备", True),
     ("test_transport.py", "代理链路/TUN/DNS/IPv6/国家判据", True),
     ("test_proxydns.py", "代理内核 DNS 解析与判定", True),
+    ("test_netprobe.py", "多源 IP 情报交叉验证", True),
+    ("test_shellenv.py", "终端时区/语言写入与撤销", True),
+    ("test_history.py", "操作日志", True),
     ("test_domainegress.py", "按域名出口（Claude 边缘视角）判定", True),
     ("test_proxyguard.py", "回落策略与客户端 IPv6", True),
     ("test_terminalegress.py", "登录 shell 的实际出口", True),
@@ -50,6 +61,7 @@ SUITES = [
     ("test_connection_monitor.py", "实际连接采样与误判边界", True),
     ("test_shield.py", "哨兵：巡检/急停条件/配色", True),
     ("test_shield_baseline.py", "哨兵基线写入", True),
+    ("test_shield_live.py", "哨兵的实时结论与 WebRTC 合并", True),
     ("test_page.py", "页面冒烟（真开 Chrome）", False),
 ]
 
@@ -75,7 +87,7 @@ def run(script: str, label: str) -> tuple[bool, str, float]:
 
 def main(argv: list[str]) -> int:
     fast = "--fast" in argv
-    print(f"Claude Tower · 全量检查{'（快速模式）' if fast else ''}\n")
+    print(f"CC Tower · 全量检查{'（快速模式）' if fast else ''}\n")
 
     results = []
     for script, label, is_fast in SUITES:
@@ -92,7 +104,7 @@ def main(argv: list[str]) -> int:
                 print(f"      {ln.strip()}")
 
     # 分发包：有就查，没有就跳过（不该因为「还没打包」判失败）
-    dist = sorted((ROOT / "dist").glob("ClaudeTower-*-windows-src.zip"))
+    dist = sorted((ROOT / "dist").glob("CCTower-*-windows-src.zip"))
     if dist and not fast:
         print("  … Windows 分发包结构")
         env = dict(os.environ)

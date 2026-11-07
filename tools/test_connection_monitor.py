@@ -11,7 +11,7 @@ HARNESS = r'''
 import Foundation
 func check(_ ok: Bool, _ name: String) { if !ok { fatalError(name) }; print("PASS " + name) }
 typealias M = ConnectionMonitor
-let ps = M.processes("10 1 /Applications/Claude.app/Contents/MacOS/Claude\n11 10 /bin/tool\n12 1 /Applications/Claude Shield.app/Contents/MacOS/Shield\n13 11 /bin/child")
+let ps = M.processes("10 1 /Applications/Claude.app/Contents/MacOS/Claude\n11 10 /bin/tool\n12 1 /Applications/CC Shield.app/Contents/MacOS/Shield\n13 11 /bin/child")
 check(M.claudePIDs(ps) == Set([10, 11, 13]), "process tree excludes shield")
 for app in ["Clash Verge", "FlClash", "Shadowrocket", "Surge"] {
  check(M.supportedClient("/Applications/" + app + ".app/Contents/MacOS/core"), "client " + app)

@@ -34,7 +34,7 @@ TARGETS = (
     ("claude.com", "https://claude.com/cdn-cgi/trace"),
     ("api.anthropic.com", "https://api.anthropic.com/cdn-cgi/trace"),
 )
-UA = "ClaudeTower domain-egress"
+UA = "CCTower domain-egress"
 TIMEOUT = 4.0
 MAX_BODY = 8192
 

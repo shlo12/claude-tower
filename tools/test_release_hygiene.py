@@ -46,6 +46,11 @@ class ReleaseHygieneTests(unittest.TestCase):
     def test_agent_markers_ignore_case(self):
         self.assertTrue(issues('a.py', b'Generated ' + b'by Codex'))
         self.assertTrue(issues('a.py', b'Co-Authored-By' + b': test'))
+        self.assertTrue(issues('a.py', b'Generated ' + b'with [Devin](https://example.test)'))
+        from check_commit_message import forbidden
+        self.assertTrue(forbidden('Fix a bug\n\nGenerated ' + 'with tool'))
+        self.assertTrue(forbidden('Fix a bug\n\nCo-Authored' + '-By: tool'))
+        self.assertFalse(forbidden('Document Claude Code integration and Codex detection'))
 
     def test_history_checks_old_blobs_and_messages(self):
         payload = b'/Users/' + b'example-user/old-file'

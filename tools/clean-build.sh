@@ -5,12 +5,12 @@
 #   tools/clean-build.sh          列出会删什么
 #   tools/clean-build.sh -f       真的删
 #
-# 只碰 build/ 下的中间产物和项目根目录的 Claude Tower.app，不动别的东西。
+# 只碰 build/ 下的中间产物和项目根目录的 CC Tower.app，不动别的东西。
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$DIR/build"
-APP="$DIR/Claude Tower.app"
+APP="$DIR/CC Tower.app"
 FORCE=0
 [ "${1:-}" = "-f" ] || [ "${1:-}" = "--force" ] && FORCE=1
 
@@ -40,5 +40,5 @@ printf '%s' "$TARGETS" | while IFS= read -r p; do
   rm -rf "$p"
   echo "  已删 $(basename "$p")"
 done
-[ -e "$APP" ] && { rm -rf "$APP"; echo "  已删 Claude Tower.app"; }
+[ -e "$APP" ] && { rm -rf "$APP"; echo "  已删 CC Tower.app"; }
 echo "✓ 清理完成"

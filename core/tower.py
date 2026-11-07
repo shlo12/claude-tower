@@ -48,6 +48,7 @@ HOME = Path.home()
 STATE_DIR = HOME / ".ccclean"
 TOWER_FILE = STATE_DIR / "tower.json"
 TOUR_FILE = STATE_DIR / "tour-history.json"
+DISMISS_FILE = STATE_DIR / "dismissed.json"
 TOUR_KEEP = 80
 
 SEV_RANK = {"pass": 0, "info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
@@ -170,14 +171,29 @@ def _idx(scan):
     return {i.get("id"): i for i in (scan.get("items") or [])}
 
 
+def _matches(idx, iid):
+    """一个 id 可能对应多个条目：以 `.*` 结尾表示「这个家族的每一条」。
+
+    扫描器有几个条目的 id 是带后缀的——`cred.shell_keys.zshrc`、
+    `marker.base_url.<域名>`、`cred.settings.<文件>`。它们各自对应「哪个文件」
+    这件事，写的时候必须区分，读的时候却要一次看全。以前这里只做精确匹配，
+    结果是塔引用 `cred.shell_keys`、扫描产出 `cred.shell_keys.zshrc`，两边
+    永远对不上：一条 high 级的「API 密钥明文写在 .zshrc」在关卡上显示成
+    「未发现凭据残留」。宁可多匹配，也不能让危险项被自己的 id 藏起来。
+    """
+    if isinstance(iid, str) and iid.endswith(".*"):
+        base = iid[:-2] + "."
+        return [v for k, v in idx.items() if isinstance(k, str) and k.startswith(base)]
+    it = idx.get(iid)
+    return [it] if it else []
+
+
 def _worst(idx, ids):
     best = None
-    for i in ids:
-        it = idx.get(i)
-        if not it:
-            continue
-        if best is None or SEV_RANK.get(it.get("severity"), 0) > SEV_RANK.get(best.get("severity"), 0):
-            best = it
+    for iid in ids:
+        for it in _matches(idx, iid):
+            if best is None or SEV_RANK.get(it.get("severity"), 0) > SEV_RANK.get(best.get("severity"), 0):
+                best = it
     return best
 
 
@@ -186,12 +202,14 @@ def _blank(value="未发现相关问题", detail=""):
 
 
 def _fixable_ids(idx, ids):
+    """可以一键修的真实条目 id。`.*` 要展开成具体 id——前端按 id 找条目。"""
     out = []
     for iid in ids:
-        it = idx.get(iid) or {}
-        fix = it.get("fix")
-        if fix and fix.get("kind") != "manual" and iid not in out:
-            out.append(iid)
+        for it in _matches(idx, iid):
+            real = it.get("id")
+            fix = it.get("fix")
+            if real and fix and fix.get("kind") != "manual" and real not in out:
+                out.append(real)
     return out
 
 
@@ -210,14 +228,17 @@ def _from_items(idx, ids, empty_value="未发现相关问题", empty_detail=""):
     }
 
 
-# 3-4 这一关除了 DNS，还要看两条独立的出口证据：回落组会不会退到直连、
-# 终端里的 curl 从哪出去。它们各有自己的条目，这里只把更严重的那条顶到
-# 卡面上，证据全部保留。
-_PROXY_EXTRAS = ("net.proxy_fallback", "net.terminal_egress")
+# 3-4 这一关除了 DNS，还要看三条独立的出口证据：回落组会不会退到直连、
+# 自动测速组会不会自己把出口换走、终端里的 curl 从哪出去。它们各有自己的
+# 条目，这里只把更严重的那条顶到卡面上，证据全部保留。
+#
+# `net.proxy_drift` 曾经漏在这里：它扫得出「组是 url-test，出口随时会变」，
+# 但没有任何一关读它，等于白扫——而这正是「分流全绿、出口却换了」的那种情况。
+_PROXY_EXTRAS = ("net.proxy_fallback", "net.proxy_drift", "net.terminal_egress")
 
 
 def _merge_proxy_extras(out, idx):
-    extras = [idx.get(i) for i in _PROXY_EXTRAS if idx.get(i)]
+    extras = [it for i in _PROXY_EXTRAS for it in _matches(idx, i)]
     if not extras:
         return out
     worst = max(extras, key=lambda e: SEV_RANK.get(e.get("severity"), 0))
@@ -268,7 +289,8 @@ def _probe_tz(scan, ctx):
 def _probe_lang(scan, ctx):
     idx = _idx(scan)
     lang = (scan.get("system") or {}).get("locale") or "未知"
-    ids = ["locale.lang", "locale.client_lang", "locale.browser", "fp.cn_browser"]
+    ids = ["locale.lang", "locale.client_lang", "locale.browser", "fp.cn_browser",
+           "locale.shell_env"]
     out = _from_items(idx, ids, f"语言环境 {lang}，与出口区域无明显冲突")
     if out["sev"] != "pass":
         worst = _worst(idx, ids) or {}
@@ -278,6 +300,9 @@ def _probe_lang(scan, ctx):
         elif worst.get("id") == "locale.client_lang":
             # 客户端语言在它自己的设置里，系统「语言与地区」改不到
             out["act"] = _act("goto", label="去魔镜看客户端语言", tab="findings")
+        elif worst.get("id") == "locale.shell_env":
+            # 终端环境是另一层：系统设置改对了，shell 里那几条 export 还在
+            out["act"] = _act("goto", label="去「终端时区/语言」写入", tab="privacy")
         else:
             out["act"] = _act("open", label="打开「语言与地区」设置", pane="region")
     return out
@@ -392,6 +417,8 @@ def _probe_identity(scan, ctx):
 
 def _probe_session(scan, ctx):
     idx = _idx(scan)
+    # `fp.telemetry` 这一条已经没有产出方（遥测归到 res.telemetry.* 了），
+    # 留着只是为了让这一关的 id 列表和「遥测」这个词对得上，匹配为空不报错。
     ids = ["fp.projects_meta", "fp.telemetry", "fp.history_jsonl", "fp.session-env",
            "fp.file-history", "fp.sessions",
            "res.telemetry.telemetry", "res.telemetry.statsig", "res.telemetry.logs", "res.telemetry.cache"]
@@ -399,7 +426,13 @@ def _probe_session(scan, ctx):
 
 
 def _probe_cred(scan, ctx):
-    return _f2_act(_from_items(_idx(scan), ["cred.legacy_file", "cred.shell_keys"], "未发现凭据残留"))
+    # 凭据这一关必须看全四个来源，任何一个漏了都会变成「未发现凭据残留」：
+    # 旧版遗留文件、shell 启动文件里的导出、settings.json 的 env 段、钥匙串。
+    # 后两类曾经因为 id 带后缀而永远匹配不上，等于这一关只查了一半。
+    return _f2_act(_from_items(
+        _idx(scan),
+        ["cred.legacy_file", "cred.shell_keys.*", "cred.settings.*", "cred.keychain.*"],
+        "未发现凭据残留"))
 
 
 def _probe_residue(scan, ctx):
@@ -417,7 +450,7 @@ def _probe_launch(scan, ctx):
 
 
 def _probe_relay(scan, ctx):
-    out = _from_items(_idx(scan), ["marker.base_url"], "未设置 ANTHROPIC_BASE_URL")
+    out = _from_items(_idx(scan), ["marker.base_url.*"], "未设置 ANTHROPIC_BASE_URL")
     if out["sev"] != "pass":
         out["act"] = _act("goto", label="去魔镜定位来源", tab="findings")
     return out
@@ -474,7 +507,8 @@ def _probe_ip(scan, ctx):
 
 
 def _probe_egress(scan, ctx):
-    out = _from_items(_idx(scan), ["net.egress", "net.country"], "出口不是机房类型")
+    out = _from_items(_idx(scan), ["net.egress", "net.country", "net.ip_consensus"],
+                      "出口不是机房类型")
     if out["sev"] != "pass":
         out["act"] = _act("open", label="打开「网络」设置", pane="network")
     return out
@@ -547,7 +581,11 @@ def _probe_egress_drift(scan, ctx):
 
 def _probe_proxy(scan, ctx):
     idx = _idx(scan)
-    out = _from_items(idx, ["net.proxy", "net.reachable", "net.proxy_path", "net.dns_route"]
+    # shield.live 是哨兵在两次扫描之间看到的东西。静态扫描能证明「配置写对了」，
+    # 证明不了「运行时真的走了代理」——Claude 正在直连、客户端开着却没接管，
+    # 这两种只有持续观察发现得了，所以并进这一关一起判。
+    out = _from_items(idx, ["net.proxy", "net.reachable", "net.proxy_path", "net.dns_route",
+                            "shield.live"]
                       + sorted(i for i in idx if i.startswith("net.proxy_env")),
                       "没有检测到系统代理")
 
@@ -1004,7 +1042,7 @@ def _browser_probe(scan, ctx):
 def _routing_probe(scan, ctx):
     idx = _idx(scan)
     ids = ["net.routing", "net.tun_loop", "net.pinned", "net.webrtc",
-           "net.proxy_path", "net.tun"]
+           "net.proxy_path", "net.tun", "net.vm_network"]
     out = _from_items(idx, ids, "分流链路干净")
     if out["sev"] != "pass":
         worst = _worst(idx, ids) or {}
@@ -1159,7 +1197,9 @@ _F3 = [
         _probe_egress),
     _lv("3-4", "代理与 DNS", "泄密管道", "pipe", "#a8763a",
         "系统代理和 DNS 会把真实位置泄露出去，即使流量走的是海外出口。"
-        "TUN 接管后真正解析域名的是代理内核，系统 DNS 设置只是表面；两边都要看。",
+        "TUN 接管后真正解析域名的是代理内核，系统 DNS 设置只是表面；两边都要看。"
+        "配置写对不等于运行时走了代理——Claude 此刻有没有一条绕过代理的直连，"
+        "只有哨兵看得见，它的结论也并进这一关。",
         ["检查系统代理与系统 DNS 设置",
          "再看代理客户端的 DNS：nameserver 里删掉国内解析器",
          "节点域名（proxy-server-nameserver）用国内解析不暴露访问域名",
@@ -1284,6 +1324,51 @@ def reset():
         "hp": BASE_STAT["hp"], "deaths": 0,
     }})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- 已知晓（忽略）
+
+def _level_ids() -> set:
+    """能忽略的只有小关检测。层主和塔主是战斗位，不是检测项。"""
+    return {lv["id"] for f in FLOORS[:4] for lv in f["levels"]}
+
+
+def _dismissed_map() -> dict:
+    """{关卡 id: 记录}。用户标了「已知晓」的检测——不再拦路，但记录
+    留着：结算页照常展开看，随时能恢复，而且恢复之前每次扫描依然
+    真跑探针，结果不会造假。"""
+    data = _read_json(DISMISS_FILE, {})
+    items = data.get("items") if isinstance(data, dict) else None
+    out = {}
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and it.get("id") in _level_ids():
+            out[it["id"]] = it
+    return out
+
+
+def set_dismissed(lid: str, on: bool, meta: dict | None = None) -> dict:
+    if lid not in _level_ids():
+        raise ValueError("没有这一关")
+    items = _dismissed_map()
+    if on:
+        items[lid] = {
+            "id": lid,
+            "ts": time.time(),
+            "sev": str((meta or {}).get("sev") or "")[:16],
+            "title": str((meta or {}).get("title") or "")[:40],
+        }
+    else:
+        items.pop(lid, None)
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _write_json(DISMISS_FILE,
+                {"items": sorted(items.values(), key=lambda x: x.get("ts") or 0)})
+    try:
+        os.chmod(DISMISS_FILE, 0o600)
+    except OSError:
+        pass
+    return {"ok": True,
+            "dismissed": [k for k, _ in sorted(items.items(),
+                                             key=lambda kv: kv[1].get("ts") or 0)]}
 
 
 # ---------------------------------------------------------------- 挑战历史
@@ -1565,6 +1650,7 @@ def build(scan, ip=None, persist=True):
     run = _load_run()
 
     # 先跑一遍探针，拿到每关的实时结论（关卡状态不落盘）
+    dismissed = _dismissed_map()
     raw = []
     for f in FLOORS[:4]:
         rows = []
@@ -1572,12 +1658,14 @@ def build(scan, ip=None, persist=True):
             p = lv["probe"](scan, ctx)
             sev = p.get("sev") or "info"
             ok = SEV_RANK.get(sev, 1) <= SEV_RANK["low"]
+            ignored = not ok and lv["id"] in dismissed
             rec = run["levels"].get(lv["id"]) or {}
             fought = bool(rec.get("fought"))
             rows.append({
-                "lv": lv, "probe": p, "sev": sev, "ok": ok,
-                "fought": fought, "defeated": fought and ok,
-                "revived": bool(rec.get("ok")) and not ok,
+                "lv": lv, "probe": p, "sev": sev, "ok": ok or ignored,
+                "dismissed": ignored,
+                "fought": fought, "defeated": fought and (ok or ignored),
+                "revived": bool(rec.get("ok")) and not ok and not ignored,
             })
         raw.append(rows)
 
@@ -1636,6 +1724,7 @@ def build(scan, ip=None, persist=True):
                 "how": lv["how"],
                 "sev": r["sev"],
                 "ok": r["ok"],
+                "dismissed": r["dismissed"],
                 "fought": r["fought"],
                 "defeated": r["defeated"],
                 "revived": r["revived"],
@@ -1734,6 +1823,7 @@ def build(scan, ip=None, persist=True):
         },
         "current": current,
         "cleared": final["defeated"],
+        "dismissed": sorted(dismissed),
         "tour": {
             "count": tours["count"],
             "kept": tours["kept"],

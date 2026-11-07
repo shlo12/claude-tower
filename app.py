@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -26,14 +27,16 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
 
 from core import (  # noqa: E402
-    align, browserwebrtc, checklist, cleaner, compat, deep, ipcheck, ipv6cfg,
-    isolation, leaderboard, location, netcfg, privacy, proxyfix, proxydiag,
-    regioncfg, rules, scanner, shellproxy, shield, tower, uninstall, updater,
-    watch, wizard,
+    align, browserwebrtc, checklist, cleaner, compat, deep, history, ipcheck,
+    ipv6cfg, isolation, leaderboard, location, netcfg, privacy, proxyfix,
+    control, proxydiag, regioncfg, rules, scanner, shellenv, shellproxy, sessionapi, shield, tower,
+    uninstall, updater, watch, wizard,
 )
 
 WEB = ROOT / "web"
-VERSION = "2.19.9"
+from core import vmnetwork
+
+VERSION = "2.25.0"
 PRIVACY_TOKEN = secrets.token_urlsafe(32)
 # 每次启动重新生成的会话令牌。所有 /api/ 请求都要带上它（X-CClean-Token）。
 # 用自定义头而不是 cookie，是因为自定义头会强制浏览器先发 OPTIONS 预检，
@@ -183,10 +186,31 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in ("/api/privacy", "/api/ipv6", "/api/proxyfix",
                            "/api/region", "/api/align", "/api/location",
-                           "/api/shellproxy"):
+                           "/api/shellproxy", "/api/shellenv", "/api/history", "/api/sessionapi"):
             # 这几个接口自己用 PRIVACY_TOKEN，而且要先把令牌发给页面，不能走统一闸门
             if not self._local_request():
                 return self._err("只允许本地应用页面访问", 403)
+            if vmnetwork.enabled() and parsed.path in ('/api/ipv6', '/api/proxyfix', '/api/shellproxy', '/api/sessionapi'):
+                return self._json({'ok': True, 'token': PRIVACY_TOKEN, 'vmManaged': True,
+                                   'supported': False, 'canApply': False, 'canUndo': False,
+                                   'message': '虚拟机网络由现有 mihomo 与 pf 管理，此工具不修改固定链路',
+                                   'reason': '固定链路由现有 mihomo 与 pf 管理，无需普通客户端修复',
+                                   'error': '固定链路由现有 mihomo 与 pf 管理，无需写入终端代理',
+                                   'clients': [], 'automatic': [], 'disabled': [], 'foreign': []})
+            if parsed.path == "/api/sessionapi":
+                return self._json({"ok": True, "token": PRIVACY_TOKEN, **sessionapi.status()})
+            if parsed.path == "/api/history":
+                n = (parse_qs(parsed.query).get("n") or ["20"])[0]
+                try:
+                    count = int(n)
+                except (TypeError, ValueError):
+                    count = 20
+                return self._json({"ok": True, "token": PRIVACY_TOKEN,
+                                   "items": history.tail(count),
+                                   "labels": history.ACTIONS})
+            if parsed.path == "/api/shellenv":
+                return self._json({"ok": True, "token": PRIVACY_TOKEN,
+                                   **shellenv.status()})
             if parsed.path == "/api/proxyfix":
                 # DNS 解析器统一是独立的一件事，单独问一次，别把它塞进规则状态：
                 # 规则那张卡读失败时不该连带把 DNS 这一块也弄成不可用。
@@ -210,17 +234,52 @@ class Handler(BaseHTTPRequestHandler):
         return self._static(parsed.path)
 
     def do_POST(self):
+        self._maintenance_fd = None
+        try:
+            return self._post()
+        finally:
+            if self._maintenance_fd is not None:
+                os.close(self._maintenance_fd)
+
+    def _post(self):
         parsed = urlparse(self.path)
         path = parsed.path
 
         # 先过闸门再读 body：没通过校验的请求连 4KB 的 JSON 都不必解析
         if path not in ("/api/privacy", "/api/ipv6", "/api/proxyfix",
                         "/api/region", "/api/align", "/api/location",
-                        "/api/shellproxy") \
+                        "/api/shellproxy", "/api/shellenv", "/api/history", "/api/sessionapi") \
                 and path.startswith("/api/") and not self._guard():
             return
 
         body = self._body()
+        if not isinstance(body, dict):
+            return self._err("请求必须是 JSON 对象")
+        if path == "/api/netcfg":
+            country = body.get("country", "")
+            if not isinstance(country, str) or (country.strip() and not re.fullmatch(r"[A-Za-z]{2}", country.strip())):
+                return self._err("出口国家必须是两位字母代码")
+
+        if path == "/api/control":
+            if not isinstance(body, dict) or body.get("confirm") is not True:
+                return self._err("请确认哨兵操作")
+            try:
+                return self._json(control.send(body.get("action", "")))
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._err(str(exc), 409)
+
+        private = {"/api/privacy", "/api/ipv6", "/api/proxyfix", "/api/region", "/api/align",
+                   "/api/location", "/api/shellproxy", "/api/shellenv", "/api/sessionapi"}
+        if path in private and (not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN)):
+            return self._err("请求来源无效，请重新打开本应用页面", 403)
+        if vmnetwork.enabled() and path in ('/api/ipv6', '/api/proxyfix', '/api/shellproxy', '/api/sessionapi'):
+            return self._err('虚拟机固定链路由 mihomo 与 pf 管理，禁止使用普通客户端网络修复', 409)
+        if path in control.MAINTENANCE_PATHS or (path == "/api/update" and body.get("action") == "install"):
+            try:
+                self._maintenance_fd = control.begin_maintenance()
+            except (OSError, RuntimeError) as exc:
+                return self._err("请先在守护台结束本次使用，再修复设置：" + str(exc), 409)
 
         if path == "/api/privacy":
             if not self._local_request() or not secrets.compare_digest(
@@ -248,6 +307,56 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["scan"] = None
                 return self._json({"ok": True, **result})
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                return self._err(str(exc), 400)
+
+        if path == "/api/sessionapi":
+            if not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN):
+                return self._err("请求来源无效", 403)
+            if not isinstance(body, dict) or body.get("confirm") is not True or body.get("action") not in ("apply", "undo"):
+                return self._err("请预览并确认接口变更", 400)
+            try:
+                return self._json(sessionapi.apply(body["action"]))
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._err(str(exc), 400)
+
+        if path == "/api/history":
+            if not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN
+            ):
+                return self._err("请求来源无效，请重新打开本应用页面", 403)
+            if not isinstance(body, dict) or body.get("action") != "clear" \
+                    or body.get("confirm") is not True:
+                return self._err("请先确认要清空操作日志")
+            try:
+                return self._json({"ok": True, **history.clear()})
+            except (OSError, ValueError) as exc:
+                return self._err(str(exc), 400)
+
+        if path == "/api/shellenv":
+            if not self._local_request() or not secrets.compare_digest(
+                self.headers.get("X-CClean-Privacy-Token", ""), PRIVACY_TOKEN
+            ):
+                return self._err("请求来源无效，请重新打开本应用页面", 403)
+            if not isinstance(body, dict) or body.get("action") not in (
+                    "apply", "undo", "wrapper") or body.get("confirm") is not True:
+                return self._err("请先预览并确认要执行的操作")
+            try:
+                if body["action"] == "undo":
+                    result = shellenv.undo()
+                elif body["action"] == "wrapper":
+                    result = shellenv.write_wrapper(
+                        body.get("country") or "",
+                        body.get("timezone") or "",
+                        body.get("locale") or "")
+                else:
+                    result = shellenv.apply(
+                        body.get("country") or "",
+                        body.get("timezone") or "",
+                        body.get("locale") or "")
+                STATE["scan"] = None
+                return self._json({"ok": True, **result})
+            except (OSError, ValueError, RuntimeError) as exc:
                 return self._err(str(exc), 400)
 
         if path == "/api/proxyfix":
@@ -589,6 +698,17 @@ class Handler(BaseHTTPRequestHandler):
             tower.reset()
             return self._json({"ok": True, "state": _tower_payload()})
 
+        if path == "/api/tower/dismiss":
+            if body.get("action") not in ("dismiss", "restore"):
+                return self._err("未知操作")
+            try:
+                out = tower.set_dismissed(
+                    str(body.get("id") or ""), body.get("action") == "dismiss",
+                    meta={"sev": body.get("sev"), "title": body.get("title")})
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._err(str(exc), 400)
+            return self._json(out)
+
         if path == "/api/quit":
             self._json({"ok": True})
             threading.Timer(0.35, _quit_process).start()
@@ -713,12 +833,21 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/") and not self._guard():
             return
         if parsed.path == "/api/profiles":
-            q = parse_qs(parsed.query)
-            return self._json({"ok": True, **isolation.delete_profile((q.get("slug") or [""])[0])})
+            fd = None
+            try:
+                fd = control.begin_maintenance()
+                q = parse_qs(parsed.query)
+                return self._json({"ok": True, **isolation.delete_profile((q.get("slug") or [""])[0])})
+            except (OSError, RuntimeError) as exc:
+                return self._err(str(exc), 409)
+            finally:
+                if fd is not None: os.close(fd)
         return self._err("未知接口", 404)
 
     # ---------------------------------------------------------- API
     def _api_get(self, path: str, query: dict):
+        if path == "/api/control":
+            return self._json({"ok": True, **control.status()})
         if path == "/api/meta":
             return self._json(
                 {
@@ -949,7 +1078,7 @@ def _tour_report_md(rec: dict) -> str:
     floors = rec.get("floors") or []
     gear = rec.get("gear") or []
     lines = [
-        "# Claude Tower · 全塔挑战战报",
+        "# CC Tower · 全塔挑战战报",
         "",
         f"- 挑战编号：**#{no}**",
         f"- 挑战时间：{rec.get('at') or '-'}",
@@ -1024,11 +1153,30 @@ def _free_port(start: int = 8787) -> int:
 
 
 def _write_runtime(url: str, port: int) -> None:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    """把「引擎在哪个端口」告诉哨兵。
+
+    这份文件不是敏感数据，但它指向的端口后面是一个拿着会话令牌的完整 API
+    ——页面会在 HTML 里带 `cc-token`，谁拿到端口谁就能取到令牌。所以目录
+    0700、文件 0600：同机的其他用户不该知道该敲哪个端口。`mkdir` 的 mode
+    只在新建时生效，老安装留下的 0755 目录要单独 chmod 一次。
+    """
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(RUNTIME_DIR, 0o700)
+    except OSError:
+        pass
     target = RUNTIME_DIR / "runtime.json"
-    target.write_text(
-        json.dumps({"pid": os.getpid(), "url": url, "port": port, "at": time.time()}), encoding="utf-8"
-    )
+    # 临时文件 + 原子替换：哨兵每 0.25 秒读一次，直接覆写会读到半截 JSON。
+    fd, name = tempfile.mkstemp(prefix=".runtime-", dir=str(RUNTIME_DIR))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "parent": os.getppid(), "url": url,
+                       "port": port, "at": time.time()}, stream)
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
     def _cleanup():
         try:

@@ -5,8 +5,7 @@
 - **失败时退到哪。** fallback / url-test / load-balance 组里只要列了
   DIRECT，节点全挂或测速选中它时，请求就从本机真实地址发出——分流规则
   看起来全绿，出口却是国内。select 组里的 DIRECT 只是「可以手动选」，
-  不参与自动回落；但如果它的默认成员（第一个）就是 DIRECT，那么规则
-  指向它时默认就走直连。
+  不参与自动回落；它的第一个成员仅代表配置默认顺序，不能据此推断当前实际选择。
 - **客户端自己有没有开 IPv6。** 系统层关了、客户端还开着，解析与走 v6
   的请求仍可能绕过只接管 v4 的链路。
 
@@ -294,8 +293,8 @@ def _take_rule(item: str, eco: list, targets: list) -> str:
 def _walk(start: str, groups: dict) -> dict:
     """按默认选择往下走：select 与回落组都先看第一个成员。
 
-    返回的 `direct` 只在**确定**会走 DIRECT 时为真（select 默认项、组本身
-    就是 DIRECT）。url-test 谁最快不确定，不在这里下结论；但组成员里有
+    返回的 `direct` 只在规则直接指向 DIRECT 时为真。组内第一个成员
+    仅用于收集配置风险，不代表当前选择。url-test 谁最快不确定，不在这里下结论；但组成员里有
     DIRECT 会记进 `failopen`，那才是要报的风险。
     """
     hops: list[dict] = []
@@ -306,7 +305,7 @@ def _walk(start: str, groups: dict) -> dict:
         up = name.upper()
         if up in _TERMINALS:
             return {"terminal": up, "hops": hops, "failopen": failopen,
-                    "direct": up == "DIRECT"}
+                    "direct": up == "DIRECT" and not hops}
         if name in seen:
             break
         seen.add(name)
@@ -323,7 +322,9 @@ def _walk(start: str, groups: dict) -> dict:
         hops.append({"name": name, "type": gtype})
         if not members:
             break
+        # 仅沿配置默认路径收集潜在风险，不把组内 DIRECT 当作实际选择。
         name = members[0]
+
     return {"terminal": name, "hops": hops, "failopen": failopen, "direct": False}
 
 

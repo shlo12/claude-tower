@@ -1,7 +1,7 @@
 import AppKit
 
-// Claude Shield 的应用图标：程序生成，仓库里不放设计素材。
-// 深色圆角底 + 金色五边形盾 + 盾内一座三层小塔——和 Claude Tower 是同一个记号体系。
+// CC Shield 的应用图标：程序生成，仓库里不放设计素材。
+// 深色圆角底 + 金色五边形盾 + 盾内一座三层小塔——和 CC Tower 是同一个记号体系。
 //
 //   swiftc -O tools/make-shield-icon.swift -o build/make-shield-icon
 //   build/make-shield-icon build/Shield.iconset

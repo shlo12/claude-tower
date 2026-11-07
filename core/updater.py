@@ -57,7 +57,7 @@ MAX_ASSET_BYTES = 300 * 1024 * 1024
 MAX_EXTRACT_BYTES = 900 * 1024 * 1024
 MAX_ZIP_ENTRIES = 6000
 MANIFEST_NAME = "update-manifest.json"
-USER_AGENT = "ClaudeTower-Updater"
+USER_AGENT = "CCTower-Updater"
 GITHUB_API = "https://api.github.com"
 
 TOWER_BUNDLE_ID = "com.ccclean.app"
@@ -154,7 +154,7 @@ def _clean_repo(value: str) -> str:
     if not text:
         return ""
     if not _REPO_RE.match(text):
-        raise UpdateError("仓库格式应为主持人/仓库名，例如 owner/claude-tower")
+        raise UpdateError("仓库格式应为主持人/仓库名，例如 owner/cc-tower")
     return text
 
 
@@ -220,19 +220,27 @@ def _valid_version(value: str) -> str:
 
 def nested_shield(tower_app: Path) -> Path:
     """哨兵的位置由宿主决定：塔的 Resources 里，只有一个 .app。"""
+    return Path(tower_app) / "Contents" / "Resources" / "CC Shield.app"
+
+
+def nested_shield_legacy(tower_app: Path) -> Path:
+    """改名前部署的嵌套哨兵还叫 Claude Shield.app。"""
     return Path(tower_app) / "Contents" / "Resources" / "Claude Shield.app"
 
 
 def installed_shield_version(tower_app: Path | None = None) -> str:
     apps = []
     if tower_app:
-        apps.append(nested_shield(tower_app))
+        apps += [nested_shield(tower_app), nested_shield_legacy(tower_app)]
     else:
-        running = _running_app("Claude Tower.app")
-        if running:
-            apps.append(nested_shield(running))
+        for name in ("CC Tower.app", "Claude Tower.app"):
+            running = _running_app(name)
+            if running:
+                apps += [nested_shield(running), nested_shield_legacy(running)]
         for root in (Path("/Applications"), HOME / "Applications"):
-            apps.append(nested_shield(root / "Claude Tower.app"))
+            for name in ("CC Tower.app", "Claude Tower.app"):
+                apps += [nested_shield(root / name),
+                         nested_shield_legacy(root / name)]
     for app in apps:
         if not app.exists():
             continue
@@ -670,7 +678,7 @@ def _download_network(repo_value: str, version: str,
     tmp = Path(tempfile.mkdtemp(dir=str(STAGING_DIR), prefix=f".{version}-"))
     try:
         asset = manifest["assets"]["tower"]
-        app_name = "Claude Tower.app"
+        app_name = "CC Tower.app"
         zip_path = tmp / "tower.zip"
         src = release["assets"].get(asset["name"])
         if not src:
@@ -684,7 +692,7 @@ def _download_network(repo_value: str, version: str,
         _verify_bundle(tower_new, app_name, version, TOWER_BUNDLE_ID)
         # 哨兵不单独下载了，但它必须在包里、版本跟清单对得上：
         # 只验塔等于放过「塔更新了、哨兵还是旧的」这种半截包。
-        _verify_bundle(nested_shield(tower_new), "Claude Shield.app",
+        _verify_bundle(nested_shield(tower_new), "CC Shield.app",
                        shield_version, SHIELD_BUNDLE_ID)
 
         # 下载期间用户可能改了仓库；那些字节来自旧仓库，不能当新仓库的暂存包
@@ -792,7 +800,8 @@ def _shield_running() -> bool:
         r = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, text=True, timeout=4)
     except (OSError, subprocess.SubprocessError):
         return False
-    return any("Claude Shield.app/Contents/MacOS/Shield" in line
+    return any(("CC Shield.app/Contents/MacOS/Shield" in line
+                or "Claude Shield.app/Contents/MacOS/Shield" in line)
                for line in (r.stdout or "").splitlines())
 
 
@@ -831,7 +840,7 @@ def _sh(value: str) -> str:
 def _write_script(script: Path, plan: dict) -> None:
     paths = {k: _sh(v) for k, v in plan.items() if isinstance(v, str)}
     text = f"""#!/bin/sh
-# Claude Tower 更新安装脚本。由 ~/.ccclean/update-run/<版本>/ 生成，
+# CC Tower 更新安装脚本。由 ~/.ccclean/update-run/<版本>/ 生成，
 # 安装结束后可以连同这个目录一起删掉。
 set -u
 
@@ -853,7 +862,14 @@ SHIELD_WAS_RUNNING={paths['shield_was_running']}
 LAUNCH={paths['launch']}
 SHIELD_PID={paths['shield_pid']}
 # 哨兵跟着塔一起换：它就在塔的 Resources 里，没有单独的目标路径
-SHIELD="$TOWER/Contents/Resources/Claude Shield.app"
+SHIELD="$TOWER/Contents/Resources/CC Shield.app"
+# 过渡期：改名前的部署里塔目录和嵌套哨兵可能还是旧名字
+SHIELDOLD="$TOWER/Contents/Resources/Claude Shield.app"
+TOWER_ORIG="$TOWER"
+TOWER_FINAL="$TOWER"
+case "$TOWER" in
+  */Claude\ Tower.app) TOWER_FINAL="$(/usr/bin/dirname "$TOWER")/CC Tower.app" ;;
+esac
 DONE=0
 TOWER_SWAPPED=0
 TOWER_BACKED=0
@@ -910,19 +926,24 @@ rollback() {{
   reason="$1"; [ "$DONE" = 1 ] && return 0
   say "ROLLBACK: $reason"
   stop_identity "$SHIELD/Contents/MacOS/ShieldWatchdog"
+  stop_identity "$SHIELDOLD/Contents/MacOS/ShieldWatchdog"
   stop_identity "$SHIELD/Contents/MacOS/Shield"
+  stop_identity "$SHIELDOLD/Contents/MacOS/Shield"
   stop_identity "$TOWER/Contents/MacOS/CCclean"
+  stop_identity "$TOWER_ORIG/Contents/MacOS/CCclean"
   stop_under "$TOWER/Contents/Resources/python"
+  stop_under "$TOWER_ORIG/Contents/Resources/python"
   /bin/sleep 1
   if [ "$TOWER_SWAPPED" = 1 ] && [ -d "$TOWER" ]; then
     /bin/mv "$TOWER" "$BACKUP/failed-tower-$$" 2>/dev/null || true
   fi
-  if [ "$TOWER_BACKED" = 1 ]; then restore_app "$BACKUP/Claude Tower.app.new" "$TOWER" || true; fi
-  /bin/rm -rf "$TOWER.ccclean-new-$$" "$TOWER.ccclean-old-$$" 2>/dev/null || true
+  if [ "$TOWER_BACKED" = 1 ]; then restore_app "$BACKUP/CC Tower.app.new" "$TOWER_ORIG" || true; fi
+  /bin/rm -rf "$TOWER_ORIG.ccclean-new-$$" "$TOWER_ORIG.ccclean-old-$$" 2>/dev/null || true
   /bin/rm -f "$STOP_MARKER" "$HEARTBEAT" "$RUNTIME"
-  # 旧塔如果是嵌哨兵的版本，open 之后它会自己把哨兵带起来
-  if [ "$LAUNCH" = 1 ] && [ -d "$TOWER" ]; then
-    /usr/bin/open "$TOWER" >/dev/null 2>&1 || true
+  # 旧塔如果是嵌哨兵的版本，open 之后它会自己把哨兵带起来。
+  # 回滚一律恢复到原路径：指向旧路径的启动项才不会失联。
+  if [ "$LAUNCH" = 1 ] && [ -d "$TOWER_ORIG" ]; then
+    /usr/bin/open "$TOWER_ORIG" >/dev/null 2>&1 || true
   fi
   write_result 0 "$reason"
   /bin/rm -f "$ACTIVE"
@@ -940,6 +961,12 @@ fi
 # 给发起安装的塔一点时间把 HTTP 响应发回页面，再动手
 /bin/sleep 2
 
+# 目标还是旧名就要换成新名；新名位置已被占用宁可不装，
+# 也不能把别人放在那里的东西挪走。
+if [ "$TOWER_FINAL" != "$TOWER" ] && [ -e "$TOWER_FINAL" ]; then
+  rollback rename-target-exists
+fi
+
 say "stop watchdog and apps"
 if [ -n "$SHIELD_PID" ]; then
   printf '%s' "$SHIELD_PID" > "$STOP_MARKER"
@@ -948,28 +975,34 @@ if [ -n "$SHIELD_PID" ]; then
   /bin/kill -TERM "$SHIELD_PID" 2>/dev/null || true
 fi
 stop_identity "$SHIELD/Contents/MacOS/ShieldWatchdog"
+stop_identity "$SHIELDOLD/Contents/MacOS/ShieldWatchdog"
 /bin/sleep 0.5
 stop_identity "$SHIELD/Contents/MacOS/Shield"
+stop_identity "$SHIELDOLD/Contents/MacOS/Shield"
 stop_identity "$TOWER/Contents/MacOS/CCclean"
 stop_under "$TOWER/Contents/Resources/python"
 wait_gone "$TOWER/Contents/MacOS/CCclean" || say "warning: old tower still running"
 wait_gone "$SHIELD/Contents/MacOS/Shield" || say "warning: old shield still running"
+wait_gone "$SHIELDOLD/Contents/MacOS/Shield" || say "warning: old shield still running"
 wait_gone_under "$TOWER/Contents/Resources/python" || say "warning: old tower python still running"
 /bin/rm -f "$STOP_MARKER" "$HEARTBEAT" "$RUNTIME"
 
 /bin/mkdir -p "$BACKUP"
 say "backup current app to $BACKUP"
 if [ -d "$TOWER" ]; then
-  /usr/bin/ditto "$TOWER" "$BACKUP/Claude Tower.app.new" || rollback backup-tower
+  /usr/bin/ditto "$TOWER" "$BACKUP/CC Tower.app.new" || rollback backup-tower
   TOWER_BACKED=1
 fi
 
 say "swap in new tower"
-NEW="$TOWER.ccclean-new-$$"; OLD="$TOWER.ccclean-old-$$"
+NEW="$TOWER_ORIG.ccclean-new-$$"; OLD="$TOWER_ORIG.ccclean-old-$$"
 /bin/rm -rf "$NEW"
 /usr/bin/ditto "$TOWER_NEW" "$NEW" || rollback stage-tower
 if ! /bin/mv "$TOWER" "$OLD" 2>/dev/null; then rollback move-old-tower; fi
-if /bin/mv "$NEW" "$TOWER"; then TOWER_SWAPPED=1; else rollback swap-tower; fi
+if /bin/mv "$NEW" "$TOWER_FINAL"; then TOWER_SWAPPED=1; else rollback swap-tower; fi
+TOWER="$TOWER_FINAL"
+SHIELD="$TOWER/Contents/Resources/CC Shield.app"
+[ "$TOWER" = "$TOWER_ORIG" ] || say "renamed to $TOWER"
 
 say "verify codesign and versions"
 # 嵌套签名会被 --deep 一并校验；下面再单独核一遍包内哨兵是否存在、版本对不对
@@ -981,7 +1014,7 @@ v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SHIELD/Cont
 [ "$v" = "$SHIELD_VER" ] || rollback version-shield
 say "codesign ok"
 
-/bin/mv "$TOWER.ccclean-old-$$" "$BACKUP/old-tower-$$" 2>/dev/null || true
+/bin/mv "$TOWER_ORIG.ccclean-old-$$" "$BACKUP/old-tower-$$" 2>/dev/null || true
 
 if [ "$LAUNCH" = 1 ]; then
   say "launch new tower"
@@ -1011,7 +1044,7 @@ if [ "$LAUNCH" = 1 ]; then
 fi
 
 say "install ok"
-/bin/rm -rf "$TOWER.ccclean-new-$$" "$TOWER.ccclean-old-$$" 2>/dev/null || true
+/bin/rm -rf "$TOWER_ORIG.ccclean-new-$$" "$TOWER_ORIG.ccclean-old-$$" 2>/dev/null || true
 write_result 1 ""
 /bin/rm -f "$ACTIVE"
 DONE=1
@@ -1048,9 +1081,11 @@ def install(*, confirm: bool, current_tower: str, current_shield: str = "",
         if _installing():
             raise UpdateError("上一次安装还没有结束")
 
-        target = Path(tower_app) if tower_app else _running_app("Claude Tower.app")
+        target = (Path(tower_app) if tower_app
+                  else (_running_app("CC Tower.app")
+                        or _running_app("Claude Tower.app")))
         if not target or not target.exists():
-            raise UpdateError("塔不是从应用包运行的，无法自动替换；请先构建并安装 Claude Tower.app")
+            raise UpdateError("塔不是从应用包运行的，无法自动替换；请先构建并安装 CC Tower.app")
         if not _writable_target(target):
             raise UpdateError(f"没有写入 {target.parent} 的权限，请手动安装新版")
 
@@ -1076,7 +1111,7 @@ def install(*, confirm: bool, current_tower: str, current_shield: str = "",
             "active": str(RUN_DIR / "active.json"),
             "stamp": str(stamp),
             "tower_target": str(target),
-            "tower_new": str(staged_dir / "tower" / "Claude Tower.app"),
+            "tower_new": str(staged_dir / "tower" / "CC Tower.app"),
             "backup": str(backup),
             "heartbeat": str(STATE_DIR / "shield-heartbeat.json"),
             "runtime": str(HOME / "Library" / "Application Support" / "CCclean" / "runtime.json"),
@@ -1128,7 +1163,8 @@ def _shield_pid() -> int | None:
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
             continue
-        if parts[1].endswith("Claude Shield.app/Contents/MacOS/Shield"):
+        if parts[1].endswith(("CC Shield.app/Contents/MacOS/Shield",
+                              "Claude Shield.app/Contents/MacOS/Shield")):
             try:
                 return int(parts[0])
             except ValueError:
@@ -1151,6 +1187,7 @@ _REASONS = {
     "launch-tower": "新塔无法启动",
     "tower-not-starting": "新塔启动后没有响应",
     "shield-not-starting": "哨兵启动后没有心跳",
+    "rename-target-exists": "目标位置已有另一个 CC Tower.app，没有替换",
 }
 
 

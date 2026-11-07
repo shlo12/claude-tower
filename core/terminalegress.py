@@ -20,7 +20,7 @@ from . import compat, domainegress, netprobe, stun
 
 # 终端里的 Claude Code 实际连的是 API 端点，所以问它比问 claude.ai 更贴近。
 TRACE_URL = "https://api.anthropic.com/cdn-cgi/trace"
-UA = "ClaudeTower terminal-egress"
+UA = "CCTower terminal-egress"
 MARKER = "__TOWER_ENV__"
 TIMEOUT = 10
 _PROXY_KEYS = frozenset({
@@ -28,6 +28,9 @@ _PROXY_KEYS = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
 })
 _SHELLS = {"zsh", "bash", "fish", "sh", "dash"}
+# 时区/语言。`LANGUAGE` 是 gettext 的优先级链，只改 LANG 不动它，
+# 界面语言照样是中文——所以它必须一起看。
+_LOCALE_KEYS = frozenset({"TZ", "LANGUAGE", "LC_ALL", "LANG"})
 
 
 def _shell() -> tuple[str, str]:
@@ -44,9 +47,32 @@ def _argv(shell: str, name: str) -> list[str]:
     script = (
         f"/usr/bin/curl -s --max-time 4 -H 'User-Agent: {UA}' '{TRACE_URL}'; "
         f"printf '\\n{MARKER}\\n'; /usr/bin/env | "
-        "/usr/bin/sed -nE 's/^(http_proxy|https_proxy|all_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)=.*/\\1=present/p'"
+        "/usr/bin/sed -nE "
+        # 代理变量只报「有没有」，值不落任何地方——那里面常常带着账号密码。
+        "-e 's/^(http_proxy|https_proxy|all_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)=.*/\\1=present/p' "
+        # 时区/语言是另一回事：要的是值本身，没有它就没法判断「终端里看到的
+        # 和出口对不对得上」。加 @ 前缀是为了和上面那组区分开，解析时不会
+        # 把 LANGUAGE 当成代理变量。`LANGUAGE` 排在 `LANG` 前面：sed 的
+        # 交替按最左最长匹配，写反了会先匹配上 LANG 然后卡在 `=` 上。
+        "-e 's/^(TZ|LANGUAGE|LC_ALL|LANG)=(.*)/@\\1=\\2/p'"
     )
     return [shell, flag, script]
+
+
+def parse_env(tail: str) -> dict:
+    """从 env 输出里挑出时区/语言那几个变量。
+
+    只认白名单，别的变量一概不看——`env` 里什么都有，不小心就会把密钥带出来。
+    值截到 64 字符：够表达任何合法时区名与 locale，也挡住畸形输入。
+    """
+    out: dict[str, str] = {}
+    for line in (tail or "").splitlines():
+        if not line.startswith("@"):
+            continue
+        key, sep, value = line[1:].partition("=")
+        if sep and key in _LOCALE_KEYS:
+            out[key] = value.strip()[:64]
+    return out
 
 
 def parse_output(text: str) -> tuple[dict | None, bool]:
@@ -67,7 +93,8 @@ def probe(baseline_ip: str = "", baseline_mask: str = "",
     """跑一次登录 shell；失败时 checked=False，不替调用方下结论。"""
     shell, name = _shell()
     out = {"checked": False, "ipMasked": "", "loc": "", "colo": "",
-           "match": None, "proxyEnv": False, "shell": name, "error": ""}
+           "match": None, "proxyEnv": False, "shell": name, "error": "",
+           "env": {}}
     if not compat.IS_MAC:
         out["error"] = "只在 macOS 上跑登录 shell"
         return out
@@ -79,6 +106,10 @@ def probe(baseline_ip: str = "", baseline_mask: str = "",
         return out
     trace, proxy_env = parse_output(text or "")
     out["proxyEnv"] = proxy_env
+    # 时区/语言和出口是同一趟 shell 里读出来的，白拿。curl 挂了也照样有用——
+    # 「终端里 Claude 会继承到什么环境」不依赖网络能不能通。
+    _, _, tail = (text or "").partition(MARKER)
+    out["env"] = parse_env(tail)
     if trace is None:
         out["error"] = "登录 shell 里没拿到出口" if text else "登录 shell 没有输出"
         return out

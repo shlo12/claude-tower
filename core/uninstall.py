@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import compat, ipv6cfg, privacy, proxyfix, shield
+from . import compat, ipv6cfg, privacy, proxyfix, shellenv, shellproxy, sessionapi, shield
 
 HOME = Path.home()
 STATE_DIR = HOME / ".ccclean"
@@ -42,8 +42,8 @@ RUNTIME_DIR = (HOME / "Library" / "Application Support" / "CCclean") if compat.I
     else (HOME / ".ccclean" / "runtime")
 
 TOWER_APP_PATHS = (
-    Path("/Applications/Claude Tower.app"),
-    HOME / "Applications" / "Claude Tower.app",
+    Path("/Applications/CC Tower.app"),
+    HOME / "Applications" / "CC Tower.app",
 )
 
 WATCHDOG_NAME = "ShieldWatchdog"
@@ -142,12 +142,12 @@ def _exec_path(pid: int) -> str:
 
 def _is_watchdog(path: str) -> bool:
     return (os.path.basename(path) == WATCHDOG_NAME
-            and "Claude Shield.app" in path)
+            and "CC Shield.app" in path)
 
 
 def _is_shield(path: str) -> bool:
     """只认应用包里的那个可执行文件，不认命令行里带 "Shield" 的别的进程。"""
-    return os.path.basename(path) == SHIELD_NAME and "Claude Shield.app" in path
+    return os.path.basename(path) == SHIELD_NAME and "CC Shield.app" in path
 
 
 def _pids(pattern: str, accept=None) -> list[int]:
@@ -268,6 +268,49 @@ def plan() -> dict:
     })
 
     try:
+        monitor_api = sessionapi.status()
+        api_active = bool(monitor_api.get("canUndo"))
+    except Exception:
+        api_active = False
+    items.append({"id": "sessionapi", "title": "恢复本机节点监测接口",
+                  "paths": ["FlClash 本机控制接口"] if api_active else [],
+                  "size": 0, "sizeText": "已配置" if api_active else "未配置",
+                  "default": api_active, "available": api_active, "kind": "module",
+                  "why": "卸载前关闭本工具创建的本机控制入口。", "danger": "仅撤销本工具创建且未被其他操作修改的入口。"})
+
+    try:
+        sp = shellproxy.status()
+        sp_active = bool(sp.get("applied") or sp.get("canUndo"))
+    except Exception:
+        sp, sp_active = {}, False
+    items.append({"id": "shellproxy", "title": "移除终端代理变量",
+                  "paths": [sp.get("file")] if sp_active and sp.get("file") else [],
+                  "size": 0, "sizeText": "已改过" if sp_active else "未改过",
+                  "default": sp_active, "available": sp_active, "kind": "module",
+                  "why": "卸载前撤销终端代理，避免终端继续指向旧端口。",
+                  "danger": "仅移除本工具的代理标记块。"})
+
+    try:
+        se = shellenv.status()
+        se_applied = bool(se.get("applied"))
+        se_file = se.get("file") or ""
+    except Exception:
+        se_applied, se_file = False, ""
+    items.append({
+        "id": "shellenv",
+        "title": "移除写进 shell 启动文件的时区/语言",
+        "paths": [se_file] if se_applied and se_file else [],
+        "size": 0,
+        "sizeText": "已改过" if se_applied else "未改过",
+        "default": se_applied,
+        "available": se_applied,
+        "kind": "module",
+        "why": "TZ / LANG / LC_ALL 是直接写进 .zshrc 的。不删的话，卸载之后这几行还在，"
+               "而这个终端里所有命令的时区都还被它管着，用户会以为是系统坏了。",
+        "danger": "只删两行标记注释之间的内容，块外的配置一个字不动。新开的终端生效。",
+    })
+
+    try:
         pv = privacy.status()
         privacy_on = bool(pv.get("restoreAvailable"))
     except Exception:
@@ -314,7 +357,7 @@ def plan() -> dict:
     if compat.IS_MAC:
         if _running(WATCHDOG_NAME, _is_watchdog):
             procs.append("看门狗")
-        if _running("Claude Shield.app/Contents/MacOS/Shield", _is_shield):
+        if _running("CC Shield.app/Contents/MacOS/Shield", _is_shield):
             procs.append("哨兵")
     items.append({
         "id": "stop",
@@ -382,7 +425,7 @@ def plan() -> dict:
     t_size = _size(tower_app) if tower_app else 0
     items.append({
         "id": "tower_app",
-        "title": "Claude Tower 应用（本程序）",
+        "title": "CC Tower 应用（本程序）",
         "paths": [_display(tower_app)] if tower_app else ["从源码运行，没有应用包"],
         "size": t_size,
         "sizeText": _size_text(t_size) if tower_app else "—",
@@ -420,21 +463,24 @@ def _warnings() -> list[str]:
 # ---------------------------------------------------------------- 执行
 
 
-_ORDER = ["proxyfix", "proxydns", "privacy", "ipv6", "stop", "launchagent",
-          "state", "runtime", "tower_app"]
+_ORDER = ["proxyfix", "proxydns", "sessionapi", "shellproxy", "shellenv", "privacy", "ipv6", "stop",
+          "launchagent", "state", "runtime", "tower_app"]
 
 # 执行时只需要标题，不需要重新扫一遍磁盘。plan() 会去量应用包的体积，
 # 在真正动手之前再跑一遍纯属浪费——而且那会儿状态可能已经变了。
 _TITLES = {
     "proxyfix": "撤销写入代理客户端的规则",
     "proxydns": "恢复代理客户端的 DNS 解析器名单",
+    "sessionapi": "恢复本机节点监测接口",
+    "shellproxy": "移除终端代理变量",
+    "shellenv": "移除写进 shell 启动文件的时区/语言",
     "privacy": "恢复 hosts 与 Claude Code 配置",
     "ipv6": "把 Wi-Fi 的 IPv6 恢复为 Automatic",
     "stop": "停止看门狗与哨兵",
     "launchagent": "移除开机自启",
     "state": "本工具的记录与备份",
     "runtime": "运行时目录",
-    "tower_app": "Claude Tower 应用（本程序）",
+    "tower_app": "CC Tower 应用（本程序）",
 }
 
 
@@ -448,6 +494,10 @@ def execute(ids: list[str], confirm: str) -> dict:
 
     results = []
     for item_id in wanted:
+        if item_id in ("state", "tower_app") and any(not r["ok"] for r in results):
+            results.append({"id": item_id, "title": _TITLES[item_id], "ok": False,
+                            "message": "前置操作失败，保留应用与恢复记录以便重试"})
+            continue
         try:
             results.append(_run_one(item_id, {"title": _TITLES.get(item_id, item_id)}))
         except Exception as exc:  # noqa: BLE001 - 单项失败不能拖垮整轮
@@ -455,7 +505,7 @@ def execute(ids: list[str], confirm: str) -> dict:
                             "ok": False, "message": str(exc)[:200]})
     return {
         "results": results,
-        "quit": "tower_app" in wanted,
+        "quit": any(r["id"] == "tower_app" and r.get("ok") for r in results),
         "trash": str(compat.trash_root()).replace(str(HOME), "~"),
     }
 
@@ -473,6 +523,20 @@ def _run_one(item_id: str, item: dict) -> dict:
         return {"id": item_id, "title": title, "ok": bool(res.get("ok", True)),
                 "message": str(res.get("message") or "已恢复 DNS 解析器名单")}
 
+    if item_id == "sessionapi":
+        res = sessionapi.apply("undo")
+        return {"id": item_id, "title": title, "ok": True, "message": res["message"]}
+
+    if item_id == "shellproxy":
+        res = shellproxy.undo()
+        return {"id": item_id, "title": title, "ok": True,
+                "message": str(res.get("message") or "已移除代理变量")}
+
+    if item_id == "shellenv":
+        res = shellenv.undo()
+        return {"id": item_id, "title": title, "ok": bool(res.get("ok", True)),
+                "message": str(res.get("message") or "已移除时区/语言设置")}
+
     if item_id == "privacy":
         res = privacy.apply(False)
         return {"id": item_id, "title": title, "ok": bool(res.get("ok", True)),
@@ -489,7 +553,7 @@ def _run_one(item_id: str, item: dict) -> dict:
         count = 0
         if compat.IS_MAC:
             n1, m1 = _stop([WATCHDOG_NAME], _is_watchdog)
-            n2, m2 = _stop(["Claude Shield.app/Contents/MacOS/Shield"], _is_shield)
+            n2, m2 = _stop(["CC Shield.app/Contents/MacOS/Shield"], _is_shield)
             count = n1 + n2
             notes.extend(m1 + m2)
         msg = f"已停止 {count} 个进程" if count else "没有在运行的进程"
@@ -545,7 +609,7 @@ def leftovers() -> list[str]:
         if shield.LAUNCH_PLIST.exists():
             left.append(f"开机自启仍在：{_display(shield.LAUNCH_PLIST)}")
         if _running(WATCHDOG_NAME, _is_watchdog) or \
-                _running("Claude Shield.app/Contents/MacOS/Shield", _is_shield):
+                _running("CC Shield.app/Contents/MacOS/Shield", _is_shield):
             left.append("哨兵相关进程仍在运行")
         for path in TOWER_APP_PATHS:
             if path.exists():

@@ -262,7 +262,7 @@ enum UpdateCheck {
         }
         var req = URLRequest(url: url)
         req.timeoutInterval = 12
-        req.setValue("ClaudeShield-Updater", forHTTPHeaderField: "User-Agent")
+        req.setValue("CCShield-Updater", forHTTPHeaderField: "User-Agent")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         var payload: Data?
         var failure = ""
@@ -351,8 +351,8 @@ enum UpdateCheck {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let apps = [host,
-                    URL(fileURLWithPath: "/Applications/Claude Tower.app"),
-                    home.appendingPathComponent("Applications/Claude Tower.app")]
+                    URL(fileURLWithPath: "/Applications/CC Tower.app"),
+                    home.appendingPathComponent("Applications/CC Tower.app")]
         for app in apps {
             guard app.pathExtension == "app" else { continue }
             let plist = app.appendingPathComponent("Contents/Info.plist")

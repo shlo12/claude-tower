@@ -1,7 +1,7 @@
 #!/bin/sh
-# 构建 Claude Shield.app（菜单栏常驻的哨兵）
+# 构建 CC Shield.app（菜单栏常驻的哨兵）
 #
-# 和 Claude Tower 不同，Shield 不内嵌 Python：巡检就是读进程表、路由表和
+# 和 CC Tower 不同，Shield 不内嵌 Python：巡检就是读进程表、路由表和
 # 系统代理开关，原生几百行就够，冷启动也是瞬间的。
 #
 # 用法：
@@ -11,7 +11,7 @@ set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$DIR/build"
-APP="${1:-$DIR/Claude Shield.app}"
+APP="${1:-$DIR/CC Shield.app}"
 CONTENTS="$APP/Contents"
 
 echo "→ 清理旧构建"
@@ -32,9 +32,9 @@ echo "→ 编译宿主程序（arm64 + x86_64 通用）"
 # 部署目标同 Tower：11.0，覆盖 Big Sur / Monterey
 for arch in arm64 x86_64; do
   swiftc -O -file-prefix-map "$DIR"=. -debug-prefix-map "$DIR"=. -target "$arch-apple-macosx11.0" -framework Cocoa -framework WebKit \
-    "$DIR/shield/Probe.swift" "$DIR/shield/Store.swift" "$DIR/shield/TzFix.swift" \
+    "$DIR/tools/UserEnvironment.swift" "$DIR/shield/Probe.swift" "$DIR/shield/Store.swift" "$DIR/shield/TzFix.swift" \
     "$DIR/shield/Watchdog.swift" "$DIR/shield/ShieldIcon.swift" \
-    "$DIR/shield/UpdateCheck.swift" \
+    "$DIR/shield/UpdateCheck.swift" "$DIR/shield/PanelGeometry.swift" \
     "$DIR/shield/ShieldApp.swift" "$DIR/shield/main.swift" \
     -o "$BUILD/shield-$arch"
 done
@@ -46,7 +46,7 @@ echo "→ 编译看门狗（独立进程）"
 # 只依赖 Foundation + Darwin：父进程没了它还得活着，不能和界面绑在一起。
 for arch in arm64 x86_64; do
   swiftc -O -file-prefix-map "$DIR"=. -debug-prefix-map "$DIR"=. -target "$arch-apple-macosx11.0" \
-    "$DIR/shield/watchdog/main.swift" -o "$BUILD/watchdog-$arch"
+    "$DIR/tools/UserEnvironment.swift" "$DIR/shield/watchdog/main.swift" -o "$BUILD/watchdog-$arch"
 done
 lipo -create -output "$CONTENTS/MacOS/ShieldWatchdog" \
   "$BUILD/watchdog-arm64" "$BUILD/watchdog-x86_64"
@@ -58,6 +58,10 @@ echo "→ 拷贝面板"
 mkdir -p "$CONTENTS/Resources/web"
 cp "$DIR/shield/web/shield.html" "$DIR/shield/web/shield.css" "$DIR/shield/web/shield.js" \
    "$CONTENTS/Resources/web/"
+
+if [ -f "$DIR/vm-profile.json" ]; then
+  cp "$DIR/vm-profile.json" "$CONTENTS/Resources/vm-profile.json"
+fi
 
 cp "$DIR/tools/Shield-Info.plist" "$CONTENTS/Info.plist"
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Shield 的静态与运行时检查。
+"""CC Shield 的静态与运行时检查。
 
 不启动界面、不真的终止任何进程：这里只验证「开关条件写对了」「配色没跑偏」
 「构建产物能用」，以及跑一次 --probe-dump 确认巡检至少不会崩。
@@ -17,8 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SHIELD = ROOT / "shield"
 # 用户拿到的是嵌在塔里的那一份；仓库根目录的单独构建只作为开发时的退路
-NESTED = ROOT / "Claude Tower.app" / "Contents" / "Resources" / "Claude Shield.app"
-APP = NESTED if NESTED.exists() else ROOT / "Claude Shield.app"
+NESTED = ROOT / "CC Tower.app" / "Contents" / "Resources" / "CC Shield.app"
+APP = NESTED if NESTED.exists() else ROOT / "CC Shield.app"
 BIN = APP / "Contents/MacOS/Shield"
 
 
@@ -40,7 +40,7 @@ def css_vars(text: str) -> dict:
 class ProbeTests(unittest.TestCase):
     def test_probe_dump_is_valid_json_with_known_verdict(self):
         if not BIN.exists():
-            self.skipTest("还没构建 Claude Shield.app")
+            self.skipTest("还没构建 CC Shield.app")
         r = subprocess.run([str(BIN), "--probe-dump"], capture_output=True, text=True, timeout=20)
         self.assertEqual(r.returncode, 0, r.stderr)
         data = json.loads(r.stdout)
@@ -65,7 +65,7 @@ class ProbeTests(unittest.TestCase):
         """FlClash 的 TUN 不改 default，而是把 0/0 拆成更细的前缀。
         用同样的内核查找核对：公网多数走 utun，面板就必须说已接管。"""
         if not BIN.exists():
-            self.skipTest("还没构建 Claude Shield.app")
+            self.skipTest("还没构建 CC Shield.app")
         r = subprocess.run([str(BIN), "--probe-dump"], capture_output=True, text=True, timeout=20)
         self.assertEqual(r.returncode, 0, r.stderr)
         data = json.loads(r.stdout)
@@ -572,8 +572,8 @@ class DnsTests(unittest.TestCase):
     def test_dns_only_probed_when_exit_ready(self):
         """出口不在时查 DNS，等于我们自己去泄漏一次。"""
         src = read(SHIELD / "Probe.swift")
-        m = re.search(r"if s\.exitReady \{(.*?)\n        \}", src, re.S)
-        self.assertIsNotNone(m, "DNS 探测不在 exitReady 分支里")
+        m = re.search(r"if s\.shouldProbeNetwork \{(.*?)\n        \}", src, re.S)
+        self.assertIsNotNone(m, "DNS 探测不在 shouldProbeNetwork 分支里")
         self.assertIn("dnsProbe(", m.group(1))
 
     def test_dig_has_timeout(self):
@@ -585,8 +585,8 @@ class DnsTests(unittest.TestCase):
     def test_stun_only_probed_when_exit_ready(self):
         """出口不在时打 STUN，等于自己把真实地址送到对方服务器上。"""
         src = read(SHIELD / "Probe.swift")
-        m = re.search(r"if s\.exitReady \{(.*?)\n        \}", src, re.S)
-        self.assertIsNotNone(m, "探测不在 exitReady 分支里")
+        m = re.search(r"if s\.shouldProbeNetwork \{(.*?)\n        \}", src, re.S)
+        self.assertIsNotNone(m, "探测不在 shouldProbeNetwork 分支里")
         self.assertIn("stunProbe(", m.group(1))
 
     def test_stun_judges_only_foreign_nodes(self):
@@ -676,11 +676,11 @@ class GateTests(unittest.TestCase):
         self.assertIn("bundleURL?.path", killer, "急停缺少按路径兜底的退路")
         self.assertIn("/Claude.app", killer)
         # 别把自己的包也认成 Claude
-        self.assertIn("Claude Shield.app", killer)
+        self.assertIn("CC Shield.app", killer)
 
     def test_idle_state_does_not_notify(self):
         """Claude 没跑时网络异常只上面板；弹通知会让人以为 Claude 那边出事了。"""
-        parts = self.src.split("if snap.claudeRunning {", 1)
+        parts = self.src.split("if snap.claudeRunning {", 2)[1:]
         self.assertEqual(len(parts), 2, "缺少 claudeRunning 的通知闸门")
         inner = parts[1].split("} else {", 1)[0]
         self.assertIn("snap.dnsSuspect", inner)
@@ -745,7 +745,7 @@ class GateTests(unittest.TestCase):
 
     def test_kill_notification_carries_the_reason(self):
         """通知正文要有「为什么」和「结果」两截：只写「已终止」等于没说原因。"""
-        self.assertIn('body: "\\(snap.title)。\\(outcome.note)"', self.src)
+        self.assertIn('body: "\\(snap.strictFailure.isEmpty ? snap.title : snap.strictFailure)。\\(outcome.note)"', self.src)
 
     # ---- 客户端在跑但没接管 ----
 
@@ -795,22 +795,22 @@ class GateTests(unittest.TestCase):
         # 闸门自己再跑一轮，也不能绕过同样的开关
         self.assertIn("cfg.level >= 2", self.src.split("func gateCheck(", 1)[1][:400])
 
-    def test_gate_only_blocks_when_it_is_sure(self):
-        """缺基线、基线过期是「判不了」，判不了就不拦——
-        拿自己的无知去阻止用户干活，比漏一次更糟。"""
+    def test_gate_requires_explicit_checked_session(self):
         body = self.src.split("func gateDecide(", 1)[1][:2500]
-        self.assertIn("snap.idleState == .blocked", body)
-        self.assertNotIn(".notower", body)
-        self.assertNotIn(".stale", body)
+        self.assertIn("StrictSessionPolicy.runningIssue(snap, admitted: admittedSession)", body)
+        self.assertIn("guard let reason = issue", body)
+        launch = self.src.split("@objc func appDidLaunch(", 1)[1][:2000]
+        self.assertIn("if admittedSession == nil", launch)
+        self.assertIn("Killer.stopSession()", launch)
 
     def test_gate_kill_is_recorded_and_announced(self):
         body = self.src.split("func gateDecide(", 1)[1][:2500]
-        self.assertIn("Killer.stop()", body)
+        self.assertIn("Killer.stopSession()", body)
         self.assertIn('kind: "gate"', body)
         self.assertIn("force: true", body)
         self.assertIn('notify(title: "Claude 启动检查未通过"', body)
         # 拦下来的理由要进通知正文，不能只说「没让启动」
-        self.assertIn('body: "\\(snap.title)。\\(outcome.note)"', body)
+        self.assertIn('body: "\\(reason)。\\(outcome.note)"', body)
 
     def test_gate_does_not_go_through_apply(self):
         """apply 会再记一条 danger、再喊一句「Claude 还在运行」，
@@ -1033,8 +1033,16 @@ class LifecycleTests(unittest.TestCase):
         m = re.search(r"func applicationDidFinishLaunching.*?\n    \}", self.src, re.S)
         self.assertIsNotNone(m)
         body = m.group(0)
-        # 用带括号的调用名：installed() 只是只读，install() 才是动系统
-        self.assertNotIn("LoginItem.install(", body)
+        # 启动项只能「修指针」不能「开开关」：install 最多出现一次，
+        # 且必须被自愈条件圈住——已选过自启、plist 还在、RunAtLoad
+        # 没被关、仅指向旧路径时才重写。toggle 依然不许出现在启动路径。
+        installs = [s.start() for s in re.finditer(r"LoginItem\.install\(", body)]
+        self.assertLessEqual(len(installs), 1)
+        if installs:
+            ctx = body[max(0, installs[0] - 400):installs[0]]
+            self.assertIn("loginStatus.installed", ctx)
+            self.assertIn("runAtLoad", ctx)
+            self.assertIn("pointsHere", ctx)
         self.assertNotIn("LoginItem.toggle", body)
         self.assertNotIn("TzFix.restore", body)
 
@@ -1066,6 +1074,13 @@ for (old, expected) in [(1,1),(2,2),(3,2),(0,1),(4,1)] {
     let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cfg)) as! [String:Any]
     precondition(encoded["level"] as! Int == expected)
 }
+var liveA = Config.Live()
+var liveB = liveA
+liveB.ruleMissing = ["test"]
+precondition(liveB.differs(from: liveA))
+liveB = liveA
+liveB.domainLabel = "changed"
+precondition(liveB.differs(from: liveA))
 print("mode migration passed")
 ''')
             built = subprocess.run(["/usr/bin/swiftc", str(SHIELD / "Store.swift"), str(d / "main.swift"),
@@ -1134,6 +1149,12 @@ class UiTests(unittest.TestCase):
         drift = {k: (panel[k], tower[k]) for k in shared if panel[k] != tower[k]}
         self.assertEqual(drift, {}, "Shield 的配色和 Tower 不一致")
 
+    def test_session_confirmation_has_native_ui_delegate(self):
+        app = read(SHIELD / "ShieldApp.swift")
+        self.assertIn("WKUIDelegate", app)
+        self.assertIn("web.uiDelegate = self", app)
+        self.assertIn("runJavaScriptConfirmPanelWithMessage", app)
+
     def test_panel_loads_its_own_assets(self):
         html = read(SHIELD / "web/shield.html")
         self.assertIn('href="shield.css"', html)
@@ -1150,6 +1171,37 @@ class UiTests(unittest.TestCase):
         for kind in ("kill", "takeover", "gate"):
             self.assertIn(f"h.kind === '{kind}'", cls)
         self.assertIn("'danger'", cls)
+
+    def test_production_stays_a_menu_bar_app(self):
+        """哨兵始终是菜单栏应用：不占 Dock、不靠启动参数开窗。
+
+        主界面是一扇「点开才出现」的 NSWindow，不是启动就摊在桌面上的普通
+        应用——所以激活策略仍是 `.accessory`，Info.plist 仍是 LSUIElement，
+        宿主也不会给它传 `--main-window`。以前这里断言过「没有 mainWindow」，
+        那是为了防「哨兵变成普通窗口应用」；现在要防的是另一件事：主界面
+        不能退回「把菜单栏面板拉宽」。
+        """
+        src = read(SHIELD / "ShieldApp.swift")
+        host = read(ROOT / "tools/CCcleanApp.swift")
+        self.assertNotIn("setActivationPolicy(.regular)", src)
+        self.assertNotIn('"--main-window"', host)
+        # 主窗口是一扇真窗口：有标题栏、能缩放、能最小化，不是拉宽的面板。
+        self.assertIn("func openMainWindow", src)
+        self.assertIn("styleMask: [.titled, .closable, .miniaturizable, .resizable]", src)
+        self.assertNotIn("func resizePanel", src)
+        # 面板自己贴到菜单栏图标下面。以前靠 popover 的 relativeTo，换成
+        # 自控面板之后这条约束落在 positionPanel + PanelGeometry 上。
+        self.assertIn("PanelGeometry.origin(anchor: anchor", src)
+        self.assertIn("statusItem.button", src)
+        self.assertIn("setActivationPolicy(.accessory)", host)
+        for name in ("Info.plist", "Shield-Info.plist"):
+            info = plistlib.loads((ROOT / "tools" / name).read_bytes())
+            self.assertTrue(info.get("LSUIElement"))
+
+    def test_native_python_startup_disables_bytecode_before_imports(self):
+        host = read(ROOT / "tools/CCcleanApp.swift")
+        self.assertIn('p.arguments = ["-B", "-c",', host)
+        self.assertIn('p.arguments = ["-B", appDir + "/app.py", "--app"]', host)
 
     def test_open_tower_is_always_on_the_panel(self):
         """塔关掉之后，哨兵面板是用户唯一还开着的窗口。入口不能只在
@@ -1187,6 +1239,28 @@ class UiTests(unittest.TestCase):
                          f"工具按钮 {len(tools)} 个（{'、'.join(tools)}），"
                          f"网格却是 {cols.group(1)} 列")
         self.assertNotIn("btn-open", tools, "「打开塔」在顶栏，不占工具这一排")
+        # 按钮字面要和它打开的东西一致：点进去是魔塔，不是一堆工具。
+        self.assertIn("<span>打开魔塔</span>", header)
+
+    def test_main_window_shows_a_dock_icon(self):
+        """主窗口在的时候要有 Dock 图标，关掉要收回。
+
+        平时它是 LSUIElement（菜单栏程序），Dock 里不该常驻一个只有盾牌的
+        程序；但主窗口是一扇真窗口，用户要靠 Dock 和 ⌘Tab 找到它。两边都得
+        切——只切一边会留下一个点不开的图标，或者一扇在 Dock 里找不到的窗口。
+        """
+        src = read(SHIELD / "ShieldApp.swift")
+        helper = src.split("func setDockPresence(", 1)[1].split("func ", 1)[0]
+        self.assertIn(".regular", helper, "打开主窗口要转成有 Dock 图标的策略")
+        self.assertIn(".accessory", helper, "关掉要退回菜单栏程序")
+        opened = src.split("func openMainWindow(", 1)[1].split("func ", 1)[0]
+        self.assertIn("setDockPresence(true)", opened)
+        closed = src.split("func windowWillClose(", 1)[1].split("func ", 1)[0]
+        self.assertIn("setDockPresence(false)", closed)
+        # 图标要先于窗口上前台，否则先出现一扇在 Dock 里找不到的窗口。
+        # 取最后一处：函数开头「窗口已经开着就直接抬到前面」那条分支不算。
+        self.assertLess(opened.index("setDockPresence(true)"),
+                        opened.rindex("makeKeyAndOrderFront"))
 
     def test_panel_escapes_dynamic_text(self):
         js = read(SHIELD / "web/shield.js")
@@ -1234,18 +1308,26 @@ class UiTests(unittest.TestCase):
         self.assertGreaterEqual(path.count("M"), 3, "外轮廓 + 内圈 + 瞳三段闭合线")
         self.assertNotIn('data-lv="1"]::before', css, "眼睛不能再回到 CSS 椭圆")
 
-    def test_production_uses_popover_not_window(self):
+    def test_production_uses_panel_not_window(self):
+        """生产形态是挂在菜单栏下的面板，不是独立窗口。
+
+        以前这条盯的是 `NSPopover()`。popover 只能一种尺寸、一种关闭策略，
+        做不了「长大以后留下来」，所以这里改成盯面板本身的两个要害：
+        非激活（不抢焦点、不进 Dock）和无边框（长得像 popover 而不是窗口）。
+        """
         src = read(SHIELD / "ShieldApp.swift")
-        self.assertIn("NSPopover()", src)
+        self.assertIn("makeShieldPanel(", src)
+        self.assertIn(".nonactivatingPanel", src)
+        self.assertIn(".borderless", src)
         # 预览窗口只能在 previewMode 分支里建
         self.assertIn("if previewMode {", src)
         self.assertIn("buildPreviewWindow()", src)
 
     # 巡检实际看的每一项都必须在面板上有一行。少了一行不是「省地方」，
     # 而是「看得到结论、看不到依据」——用户没法判断该去查哪一层。
-    MONITORED = ["f-claude", "f-route", "f-tun", "f-proxy", "f-connections",
+    MONITORED = ["f-claude", "f-route", "f-tun", "f-proxy", "f-policy", "f-connections",
                  "f-egress", "f-dns", "f-dns-egress", "f-udp", "f-transport",
-                 "f-domain", "f-tz", "f-btz", "f-at", "f-update"]
+                 "f-domain", "f-tz", "f-btz", "f-at", "f-update", "f-vm-network"]
 
     def test_panel_lists_every_monitored_field(self):
         html = read(SHIELD / "web/shield.html")
@@ -1363,12 +1445,25 @@ class UiTests(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn("LoginItem.install()", m.group(1))
 
+    def test_stale_login_item_path_is_healed_at_startup(self):
+        """App 改名或挪位置后指向旧路径的启动项，启动时悄悄修好。"""
+        src = read(SHIELD / "ShieldApp.swift")
+        self.assertIn("login item path healed", src)
+        m = re.search(r"loginStatus = LoginItem\.status\(\)(.{0,400}?)"
+                      r"LoginItem\.install\(\)", src, re.S)
+        self.assertIsNotNone(m, "自愈应该在拿到 status 后调 install")
+        self.assertIn("runAtLoad", m.group(1), "RunAtLoad 被关是用户动作，不能改回去")
+        self.assertIn("pointsHere", m.group(1))
+
     def test_panel_has_room_for_all_rows(self):
         """12 行指标 + 缺塔横幅 + 模式 + 按钮 + 最近，744 装不下。"""
         src = read(SHIELD / "ShieldApp.swift")
-        m = re.search(r"makeWebView\(NSSize\(width: 340, height: (\d+)\)\)", src)
-        self.assertIsNotNone(m)
+        # 高度现在是一个常量（以前 772 散在三处，改一处另外两处就错开）。
+        m = re.search(r"static let narrowHeight: CGFloat = (\d+)", src)
+        self.assertIsNotNone(m, "窄态高度应该有个具名常量")
         self.assertGreaterEqual(int(m.group(1)), 770)
+        # 建面板时用的必须是这个常量，不能就地写死一个数。
+        self.assertIn("height: Self.narrowHeight)", src)
         shot = read(ROOT / "tools/shoot-shield.py")
         m = re.search(r"W, H = (\d+), (\d+)", shot)
         self.assertIsNotNone(m)
@@ -1431,7 +1526,7 @@ class TransportTests(unittest.TestCase):
 
     def test_probe_runs_only_when_exit_ready(self):
         """出口不在时去连 Anthropic，测的是「这条路本身不通」，没有意义。"""
-        block = self.probe.split("if s.exitReady {", 1)[1].split("} else {", 1)[0]
+        block = self.probe.split("if s.shouldProbeNetwork {", 1)[1].split("} else {", 1)[0]
         self.assertIn("transportProbe(", block)
         self.assertIn("transportProbe(force:", self.probe)
 
@@ -1468,7 +1563,7 @@ class TransportTests(unittest.TestCase):
         self.assertNotIn("domain", m.group(1))
 
     def test_domain_probe_runs_only_when_exit_ready(self):
-        block = self.probe.split("if s.exitReady {", 1)[1].split("} else {", 1)[0]
+        block = self.probe.split("if s.shouldProbeNetwork {", 1)[1].split("} else {", 1)[0]
         self.assertIn("domainEgressProbe(", block)
         self.assertIn("domainEgressProbe(force:", self.probe)
 
@@ -1592,7 +1687,7 @@ class EgressBaselineTests(unittest.TestCase):
     def test_shield_renews_baseline_from_its_own_measurement(self):
         """不开塔也要能续期：用 trace 测到的出口走 recordEgress。"""
         app = read(SHIELD / "ShieldApp.swift")
-        body = app.split("func apply(_ snap: Snapshot) {", 1)[1][:400]
+        body = app.split("func apply(_ input: Snapshot) {", 1)[1].split("// 记账", 1)[0]
         self.assertIn("refreshEgressBaseline(snap)", body)
         self.assertIn("reportEgressChange(snap)", body)
         m = re.search(r"func refreshEgressBaseline\(.*?\n    \}", app, re.S)
@@ -1967,7 +2062,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_built_app_exists_and_is_fat(self):
         if not BIN.exists():
-            self.skipTest("还没构建 Claude Shield.app")
+            self.skipTest("还没构建 CC Shield.app")
         r = subprocess.run(["lipo", "-info", str(BIN)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertIn("arm64", r.stdout)
@@ -1984,7 +2079,7 @@ class PackagingTests(unittest.TestCase):
     def test_built_app_has_fat_watchdog(self):
         wd = APP / "Contents/MacOS/ShieldWatchdog"
         if not wd.exists():
-            self.skipTest("还没构建 Claude Shield.app")
+            self.skipTest("还没构建 CC Shield.app")
         r = subprocess.run(["lipo", "-info", str(wd)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("arm64", r.stdout)
@@ -1997,23 +2092,23 @@ class BundledAppTests(unittest.TestCase):
 
     def test_tower_build_embeds_shield_before_signing(self):
         src = read(ROOT / "tools/build-app.sh")
-        call = 'build-shield.sh" "$CONTENTS/Resources/Claude Shield.app"'
+        call = 'build-shield.sh" "$CONTENTS/Resources/CC Shield.app"'
         self.assertIn(call, src)
         self.assertLess(src.index(call), src.index("codesign --force --deep"),
                         "先嵌进资源再签名，否则外层签名一加上就失效")
 
     def test_release_ships_a_single_package(self):
         src = read(ROOT / "tools/make-release.sh")
-        self.assertNotIn("ClaudeShield-", src)
+        self.assertNotRegex(src, r'CCShield-[^\s/]*\.zip')
         self.assertNotIn('"shield":', src)
         # 清单里仍然写着包内哨兵的版本，方便面板展示
         self.assertIn('"shieldVersion": shield_version', src)
 
     def test_built_tower_contains_nested_shield(self):
-        tower = ROOT / "Claude Tower.app"
+        tower = ROOT / "CC Tower.app"
         if not tower.exists():
-            self.skipTest("还没构建 Claude Tower.app")
-        nested = tower / "Contents" / "Resources" / "Claude Shield.app"
+            self.skipTest("还没构建 CC Tower.app")
+        nested = tower / "Contents" / "Resources" / "CC Shield.app"
         self.assertTrue(nested.is_dir(), "塔的应用包里必须有哨兵")
         plist = plistlib.loads((nested / "Contents/Info.plist").read_bytes())
         self.assertEqual(plist["CFBundleIdentifier"], "com.ccclean.shield")
@@ -2021,7 +2116,7 @@ class BundledAppTests(unittest.TestCase):
 
     def test_tower_starts_bundled_shield(self):
         src = read(ROOT / "tools/CCcleanApp.swift")
-        self.assertIn('appendingPathComponent("Claude Shield.app")', src)
+        self.assertIn('appendingPathComponent("CC Shield.app")', src)
         self.assertIn('"com.ccclean.shield"', src)
         self.assertIn("startShieldIfNeeded()", src)
 
@@ -2045,19 +2140,20 @@ class BundledAppTests(unittest.TestCase):
         """两条分支可能指向同一个 .app，只看「塔起来了」分不清走的是哪条。
         安装好的产物必须能自己把答案说出来，而且说的就是面板会用的那次解析。"""
         if not BIN.exists():
-            self.skipTest("还没构建 Claude Shield.app")
+            self.skipTest("还没构建 CC Shield.app")
         r = subprocess.run([str(BIN), "--tower-path"], capture_output=True,
                            text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
         fields = dict(line.split("=", 1) for line in r.stdout.strip().splitlines()
                       if "=" in line)
-        host = ROOT / "Claude Tower.app"
+        host = ROOT / "CC Tower.app"
         self.assertEqual(fields.get("host"), str(host))
         self.assertEqual(fields.get("chosen"), "host")
         self.assertEqual(fields.get("path"), str(host))
-        # 面板里记下的也是这条分支，排障时不用猜
+        # 面板不再有「打开塔的界面」这条路：引擎启动仍走 TowerHost，
+        # 但给塔递视图的 requestedToolView 通道已经随入口一起删掉。
         src = read(SHIELD / "ShieldApp.swift")
-        self.assertIn('Store.log("open tower: via=\\(target.source.rawValue)', src)
+        self.assertNotIn("requestedToolView", src)
         self.assertIn("TowerHost.resolve()", src)
 
 
@@ -2246,7 +2342,7 @@ class WatchdogRuntimeTests(unittest.TestCase):
             helper, marker = self._helper(td)
             stranger = subprocess.Popen(["/bin/sleep", "60"])
             wd = self._run(td, helper, heartbeat_age=90, parent=stranger,
-                           exe="/Applications/Claude Shield.app/Contents/MacOS/Shield")
+                           exe="/Applications/CC Shield.app/Contents/MacOS/Shield")
             try:
                 self.assertTrue(self._wait(marker, 15), "父进程不在时看门狗没有重新拉起")
                 time.sleep(0.5)

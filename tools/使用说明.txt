@@ -1,6 +1,6 @@
-Claude Tower · macOS 使用说明
+CC Tower · macOS 使用说明
 macOS 11+，支持 Intel / Apple Silicon，自带 Python。
-解压后可把 Claude Tower.app 拖到“应用程序”，再打开。
+解压后可把 CC Tower.app 拖到“应用程序”，再打开。
 本版本为 ad-hoc 签名，未公证；首次下载可能被 macOS 拦截。
 如系统提示无法验证开发者，请先确认下载来源与 SHA256，再按系统设置“隐私与安全性”的提示决定是否允许打开。不要关闭全局安全保护。
 

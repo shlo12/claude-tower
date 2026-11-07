@@ -40,6 +40,7 @@ class Sandbox(unittest.TestCase):
         self.backups = self.tmp / "backups"
         patches = [
             patch.object(sp, "STATE", self.state),
+            patch.object(sp.history, "LOG", self.tmp / "history.jsonl"),
             patch.object(sp, "BACKUP_DIR", self.backups),
             patch.object(sp, "rc_path", lambda: (self.rc, "")),
         ]

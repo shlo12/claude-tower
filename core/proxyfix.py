@@ -29,7 +29,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import compat, kernelcheck, proxydns, shield as shield_state
+from . import compat, history, kernelcheck, proxydns, shield as shield_state
 
 HOME = Path.home()
 STATE = HOME / ".ccclean/proxyfix.json"
@@ -2198,14 +2198,33 @@ def apply(action, port_mode="proxy"):
     with LOCK:
         try:
             _state_guard()
-            if action == "apply":
-                return _apply(mode)
-            if action == "undo":
-                return _undo()
-            if action == "dns":
-                return _apply_dns()
-            if action == "dns-undo":
-                return _undo_dns()
+            if action in ("apply", "undo", "dns", "dns-undo"):
+                out = _dispatch(action, mode)
+                history.log(
+                    f"proxyfix.{'dns.' if action.startswith('dns') else 'rules.'}"
+                    f"{'undo' if action.endswith('undo') else 'apply'}",
+                    target=("DNS 解析器" if action.startswith("dns")
+                            else f"分流规则 · {mode}"),
+                    ok=bool(out.get("ok", True)),
+                    detail=str(out.get("message") or "")[:200],
+                )
+                return out
         except sqlite3.Error as exc:
+            history.log(f"proxyfix.{'dns' if action.startswith('dns') else 'rules'}.{'undo' if action.endswith('undo') else 'apply'}", ok=False,
+                        detail=f"FlClash 数据库操作失败：{exc}")
             raise RuntimeError(f"FlClash 数据库操作失败：{exc}") from exc
+        except Exception as exc:
+            history.log(f"proxyfix.{'dns' if action.startswith('dns') else 'rules'}.{'undo' if action.endswith('undo') else 'apply'}", ok=False,
+                        detail=f"{type(exc).__name__}: {exc}")
+            raise
         raise ValueError("未知操作")
+
+
+def _dispatch(action, mode):
+    if action == "apply":
+        return _apply(mode)
+    if action == "undo":
+        return _undo()
+    if action == "dns":
+        return _apply_dns()
+    return _undo_dns()

@@ -48,7 +48,7 @@ def setUpModule():
     U.STATE_DIR = base / ".ccclean"
     U.RUNTIME_DIR = base / "runtime"
     # 应用包也指到沙箱里：免得测试去量真实应用包的体积、更免得动到它
-    U.TOWER_APP_PATHS = (base / "Claude Tower.app",)
+    U.TOWER_APP_PATHS = (base / "CC Tower.app",)
 
     def fake_trash(path):
         src = Path(path)
@@ -152,6 +152,26 @@ class OrderTests(unittest.TestCase):
         self.assertIn("Resources 里", src)
 
 
+class ProxyCleanupRegressionTests(unittest.TestCase):
+    def test_proxy_undo_precedes_record_removal(self):
+        self.assertLess(U._ORDER.index("shellproxy"), U._ORDER.index("state"))
+        from unittest.mock import patch
+        with patch.object(U.shellproxy, "undo", return_value={"message": "done"}) as undo:
+            self.assertTrue(U._run_one("shellproxy", {})["ok"])
+            undo.assert_called_once()
+
+    def test_failed_undo_keeps_recovery_records_and_app(self):
+        from unittest.mock import patch
+        calls = []
+        def step(key, item):
+            calls.append(key)
+            return {"id": key, "ok": False}
+        with patch.object(U, "_run_one", side_effect=step):
+            result = U.execute(["shellproxy", "state", "tower_app"], "UNINSTALL")
+        self.assertEqual(calls, ["shellproxy"])
+        self.assertFalse(any(r["ok"] for r in result["results"]))
+
+
 class ConfirmTests(unittest.TestCase):
     def test_wrong_word_rejected(self):
         for bad in ("", "DELETE", "UNINSTAL", "y", "uninstall!"):
@@ -231,15 +251,15 @@ class ExecuteTests(unittest.TestCase):
 
     def test_removing_tower_bundle_takes_sentry_with_it(self):
         app = U.TOWER_APP_PATHS[0]
-        nested = app / "Contents" / "Resources" / "Claude Shield.app" / "Contents" / "MacOS"
+        nested = app / "Contents" / "Resources" / "CC Shield.app" / "Contents" / "MacOS"
         nested.mkdir(parents=True)
         (nested / "Shield").write_text("x", encoding="utf-8")
         row = U.execute(["tower_app"], "UNINSTALL")["results"][0]
         self.assertTrue(row["ok"], row)
         self.assertFalse(app.exists())
-        moved = _trashed("Claude Tower.app")
+        moved = _trashed("CC Tower.app")
         self.assertIsNotNone(moved)
-        self.assertTrue((moved / "Contents" / "Resources" / "Claude Shield.app" / "Contents"
+        self.assertTrue((moved / "Contents" / "Resources" / "CC Shield.app" / "Contents"
                          / "MacOS" / "Shield").exists())
 
 
@@ -324,24 +344,24 @@ class ModuleStepTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIs(calls[0][1], U._is_watchdog)
         self.assertIs(calls[1][1], U._is_shield)
-        self.assertIn("Claude Shield.app", calls[1][0][0])
+        self.assertIn("CC Shield.app", calls[1][0][0])
 
 
 class IdentityTests(unittest.TestCase):
     """kill 之前先认人：pgrep 匹配的是命令行，不是身份。"""
 
     def test_watchdog_identity(self):
-        good = "/Applications/Claude Shield.app/Contents/MacOS/ShieldWatchdog"
+        good = "/Applications/CC Shield.app/Contents/MacOS/ShieldWatchdog"
         self.assertTrue(U._is_watchdog(good))
         self.assertFalse(U._is_watchdog("/usr/bin/python3"))
         self.assertFalse(U._is_watchdog("/tmp/ShieldWatchdog"))
 
     def test_shield_identity_requires_bundle(self):
         self.assertTrue(U._is_shield(
-            "/Applications/Claude Shield.app/Contents/MacOS/Shield"))
+            "/Applications/CC Shield.app/Contents/MacOS/Shield"))
         self.assertFalse(U._is_shield("/opt/tools/Shield"))
         self.assertFalse(U._is_shield(
-            "/Applications/Claude Shield.app/Contents/MacOS/ShieldWatchdog"))
+            "/Applications/CC Shield.app/Contents/MacOS/ShieldWatchdog"))
 
     def test_exec_path_of_self_is_readable(self):
         self.assertTrue(U._exec_path(os.getpid()))

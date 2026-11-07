@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from . import (browserwebrtc, compat, domainegress, doh, location, netcfg,
-               netprobe, regioncfg, retention, rules, shield, stun, uatraits)
+               netprobe, regioncfg, retention, rules, shield, stun, uatraits, vmnetwork)
 
 HOME = Path.home()
 CLAUDE_DIR = HOME / ".claude"
@@ -400,7 +400,7 @@ def _check_gpu() -> dict:
         ev.append(_ev("分辨率", res, mono=True))
     if any(key in chip.lower() for key in _VIRTUAL_GPU):
         return _item(
-            "fp.gpu", "fingerprint", f"检测到虚拟显卡（{chip}）", "medium",
+            "fp.gpu", "fingerprint", f"检测到虚拟显卡（{chip}）", "info" if vmnetwork.enabled() else "medium",
             "虚拟显卡的型号字符串是很强的指纹：正常笔记本不会报 SwiftShader / VMware "
             "这类名字。客户端把渲染信息带出去时，这条比 CPU 型号更少见。",
             ev,
@@ -421,7 +421,7 @@ def _check_vm() -> dict:
         ev.append(_ev("机型", model, mono=True))
     if flag == "1":
         return _item(
-            "fp.vm", "fingerprint", "运行在虚拟机里", "medium",
+            "fp.vm", "fingerprint", "运行在虚拟机里", "info" if vmnetwork.enabled() else "medium",
             "kern.hv_vmm_present=1 表示当前系统跑在 hypervisor 之上。虚拟机的硬件标识、"
             "网卡 OUI 和显卡字符串都与常见零售机型不同，是一层看得见的区分度。",
             ev,
@@ -775,6 +775,33 @@ def _mask_secret(text: str) -> str:
     return text
 
 
+# 本工具自己写进启动文件的标记块。块里的内容由各模块的 apply/undo 管，
+# 扫描时要整段跳过——否则「免管理员对齐」刚写进去的 export TZ 会被当成
+# 用户手写的残留，再给一条「注释掉这一行」的修复建议，等于让我们去拆自己
+# 刚搭的东西。
+_MANAGED_RE = re.compile(r"^#\s*(?:>>>|<<<)\s*ccclean\b")
+
+
+def _managed_spans(lines: list[str]) -> list[tuple[int, int]]:
+    """标记块的 [起, 止) 行号。只有配对完整的块才算。
+
+    没有收尾标记的块不算：那说明块被破坏过，里面那几行现在真的在生效，
+    该报就得报——沉默比误报更难查。
+    """
+    spans: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not _MANAGED_RE.match(stripped):
+            continue
+        if stripped.startswith("# >>>"):
+            start = i
+        elif start is not None:
+            spans.append((start, i + 1))
+            start = None
+    return spans
+
+
 def _scan_shell_rc(needles: list[str]) -> list[dict]:
     hits: list[dict] = []
     for rc in SHELL_RC:
@@ -784,12 +811,15 @@ def _scan_shell_rc(needles: list[str]) -> list[dict]:
             lines = rc.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception:
             continue
-        for idx, line in enumerate(lines, 1):
+        spans = _managed_spans(lines)
+        for idx, line in enumerate(lines):
+            if any(a <= idx < b for a, b in spans):
+                continue
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             if any(n in stripped for n in needles):
-                hits.append({"file": str(rc).replace(str(HOME), "~"), "line": idx, "text": stripped})
+                hits.append({"file": str(rc).replace(str(HOME), "~"), "line": idx + 1, "text": stripped})
     return hits
 
 
@@ -1537,6 +1567,79 @@ def _country_expectation(country: str, expected: str, ip_masked: str = "") -> di
     )
 
 
+def _check_ip_consensus(info: dict) -> dict:
+    """多家情报源对同一个出口的判断是否一致。
+
+    单源探针有个结构性盲区：它只会给出「一家之说」。而这个地址到底属于哪个
+    国家、哪家运营方，在情报库里本来就可能是有争议的——转租的二三级机房、
+    刚变更过注册信息的地址段，各家库的更新时间不一样，答案就不一样。
+
+    Anthropic 用的是它自己的库，完全可能给出第三种答案。所以「三家都说美国」
+    和「一家说美国、一家说加拿大」是两种不同性质的事实：前者可以当作结论，
+    后者只能当作「这个地址的归属是模糊的」。
+    """
+    count = int(info.get("sourceCount") or 0)
+    sources = " / ".join(info.get("sources") or []) or "-"
+    disagree = info.get("disagree") or []
+    bad = [d for d in disagree if d.get("field") in ("country", "asn")]
+    drifted = bool(info.get("drifted"))
+
+    if count >= 2 and bad:
+        parts = []
+        for d in bad:
+            label = "国家" if d["field"] == "country" else "ASN"
+            parts.append(f"{label} " + " / ".join(str(v) for v in d["values"]))
+        what = "；".join(parts)
+        only = bad[0]["field"]
+        subject = ("国家与运营方" if len(bad) > 1
+                   else ("国家" if only == "country" else "运营方"))
+        return _item(
+            "net.ip_consensus", "network",
+            f"{count} 家情报源对出口的{subject}判断不一致",
+            "high",
+            f"同一个地址，不同情报库给出了不同的{subject}（{what}）。"
+            "Anthropic 侧用的是它自己的情报库，完全可能给出第三种答案——"
+            "换句话说，这个地址的归属本身就是模糊的，只看一家会误以为它很干净。",
+            [_ev("情报源", sources, mono=True), _ev("分歧", what, mono=True)],
+            "换一个归属清晰的出口：住宅/ISP 段，且能被多家情报源一致认定。"
+            "自建中转时优先用登记信息明确的地址段，别用转租的二三级机房。",
+            tags=["hard-signal"],
+        )
+
+    if drifted:
+        return _item(
+            "net.ip_consensus", "network",
+            "探测期间出口地址发生了变化",
+            "medium",
+            "几次情报查询是在同一个时间窗口里发出的，却回了不同的源地址。"
+            "说明出口在探测过程中自己换了——测速组按延迟挑节点、或者节点在重连。"
+            "单次快照看起来都正常，但同一个账号在一天里从多个地址出去，本身就是信号。",
+            [_ev("情报源", sources, mono=True)],
+            "把 Claude 用的代理组固定成一个节点（select 而不是 url-test），"
+            "别让它按测速自己切。",
+        )
+
+    if count < 2:
+        return _item(
+            "net.ip_consensus", "network",
+            "只有一家情报源可用，无法交叉验证",
+            "info",
+            "多家情报源里只有一家给出了结果，没法比对。"
+            "这一项不下结论——只有一家之说时，「一致」和「不一致」都是编的。",
+            [_ev("情报源", sources, mono=True)],
+            "网络恢复后重新扫描。",
+        )
+
+    return _item(
+        "net.ip_consensus", "network",
+        f"{count} 家情报源结果一致",
+        "pass",
+        "同一个地址在多家情报库里的国家与 ASN 判断相同，这个归属可以当作结论。",
+        [_ev("情报源", sources, mono=True),
+         _ev("国家", " / ".join(info.get("countries") or []) or "-", mono=True)],
+    )
+
+
 def check_network(with_network: bool = True) -> tuple[list[dict], dict]:
     items: list[dict] = []
     # 这两项要在「出口探测失败」的早退之前挂上去：
@@ -1630,6 +1733,8 @@ def check_network(with_network: bool = True) -> tuple[list[dict], dict]:
     if country_item:
         items.append(country_item)
 
+    items.append(_check_ip_consensus(info))
+
     ip_tz = info.get("timezone") or ""
     sys_tz = _system_timezone()
     if ip_tz and sys_tz and ip_tz != sys_tz:
@@ -1676,7 +1781,11 @@ def check_network(with_network: bool = True) -> tuple[list[dict], dict]:
 
     items.append(_check_reachable())
     items.append(_check_domain_egress(info))
-    items.append(_check_webrtc(info.get("ip_masked") or ""))
+    # 哨兵那份实时结论一次读完，两处共用：WebRTC 拿它补证据，
+    # 「哨兵此刻看到什么」那一条直接用。读两次没意义，还可能读到两次不同的值。
+    live = shield.live()
+    items.append(_check_webrtc(info.get("ip_masked") or "", live))
+    items.append(_check_shield_live(live))
     return items, info
 
 
@@ -1700,7 +1809,7 @@ def _check_reachable() -> dict:
         note = ""
         try:
             req = urllib.request.Request(url, method="GET",
-                                         headers={"User-Agent": "ClaudeTower"})
+                                         headers={"User-Agent": "CCTower"})
             with urllib.request.urlopen(req, timeout=6) as r:
                 status = r.status
         except urllib.error.HTTPError as exc:
@@ -1789,14 +1898,14 @@ def _check_domain_egress(info: dict) -> dict:
     )
 
 
-def _check_webrtc(egress_mask: str) -> dict:
+def _check_webrtc(egress_mask: str, live: dict | None = None) -> dict:
     """UDP 有没有和 HTTP 走同一条路。
 
     两件事分开判，因为它们的证据强度不一样：
 
     1. `exposedLeak`——国内 STUN 节点回了非基线地址。分流把国内域名放直连，
        所以这是「正确答案」；但浏览器 ICE 候选是交给**任何**网页的，境外
-       页面照样读得到，属于确定性暴露，不是可能。
+       同类节点可能向网页返回这个地址，浏览器是否得到候选需另行实测。
     2. `leak`——境外节点自相矛盾，说明 UDP 被有选择地放出去。
 
     只判第 2 项会漏掉最常见的一种：所有节点（含境外）都回同一个直连地址，
@@ -1807,21 +1916,41 @@ def _check_webrtc(egress_mask: str) -> dict:
     完整写进页面和导出的报告，等于这次检测自己制造了一次泄漏。
     """
     r = stun.probe(egress_mask)
+    vm = vmnetwork.read()
+    if vm['managed'] and vm['checked'] and vm['protected'] and vm['pfVerified'] and vm['udpBlocked'] and not r['ips']:
+        return _item("net.webrtc", "network", "公网 UDP 拒绝策略已核验", "pass",
+                     "运行中的拒绝规则与 pf 已核验，STUN 无回包符合配置；不是仅凭探测超时判安全。")
+    # 哨兵在同一件事上有它自己的证据：每十秒用 STUN 问一次，比这里单次快照
+    # 更容易撞上「刚好这一会儿是分裂的」。两边取并集——泄漏是「见过就算」的
+    # 信号，漏报的代价远大于误报；但要说清是谁看到的，否则用户没法复核。
+    live = shield.live() if live is None else live
+    s_fresh = bool(live.get("fresh"))
+    s_exposed = [str(x) for x in (live.get("stunExposed") or []) if str(x).strip()] if s_fresh else []
+    s_leak = bool(live.get("stunLeak")) if s_fresh else False
+
     ev = [
         _ev("STUN 结果", "、".join(netprobe._mask_ip(ip) for ip in r["ips"]) or "无", mono=True),
         _ev("境外节点", "、".join(netprobe._mask_ip(ip) for ip in r["foreign"]) or "无", mono=True),
         _ev("比对基线", r["mask"] or "（塔还没记录）", mono=True),
     ]
-    if r.get("exposedLeak"):
-        exposed = "、".join(netprobe._mask_ip(ip) for ip in r["exposed"])
+    if s_fresh:
+        seen = "、".join(s_exposed) if s_exposed else ("看到分裂" if s_leak else "没看到")
+        ev.append(_ev("哨兵最近一次巡检", seen, mono=True))
+    exposed_list = [netprobe._mask_ip(ip) for ip in (r.get("exposed") or [])]
+    for item in s_exposed:
+        if item not in exposed_list:
+            exposed_list.append(item)
+    if exposed_list:
+        exposed = "、".join(exposed_list)
+        who = "本次扫描" if r.get("exposedLeak") else "哨兵最近一次巡检"
         return _item(
             "net.webrtc", "network",
-            "WebRTC 会把真实地址交给网页",
-            "critical",
-            f"国内 STUN 节点回了 {exposed}，和你当前的出口基线不是同一个。"
+            "STUN 探测发现不同公网地址，存在 WebRTC 暴露风险",
+            "high",
+            f"{who}看到国内 STUN 节点回了 {exposed}，和你当前的出口基线不是同一个。"
             "分流规则把国内域名放直连，节点回家里的真实地址是正确答案；"
-            "但浏览器的 ICE 候选是交给任何网页的，境外页面同样读得到这个地址。"
-            "这不是「可能泄漏」，是已经交出去了。",
+            "使用同类 STUN 节点的网页可能取得这个地址；是否实际形成浏览器 ICE 候选，"
+            "请运行浏览器实测确认。",
             ev,
             "最省事的做法是把 STUN/TURN 端口直接拒掉，不依赖代理组是否支持 UDP："
             "3478 / 5349 / 19302 三个端口的 UDP 全部 REJECT。"
@@ -1829,13 +1958,14 @@ def _check_webrtc(egress_mask: str) -> dict:
             "把端口策略选成「直接拒绝」再写入；代价是浏览器内的 P2P 视频通话会不可用。",
             tags=["hard-signal"],
         )
-    if r["leak"]:
+    if r["leak"] or s_leak:
+        who = "" if r["leak"] else "（本次扫描没看到分裂，是哨兵在最近几分钟里看到的）"
         return _item(
             "net.webrtc", "network",
             "UDP 出口分裂，WebRTC 可能泄漏真实地址",
             "high",
             "境外 STUN 节点给出了两个不同的出口地址：一部分 UDP 进了隧道，一部分走了直连。"
-            "网页里的 WebRTC 会从直连那条把真实 IP 报给对端。",
+            "网页里的 WebRTC 会从直连那条把真实 IP 报给对端。" + who,
             ev,
             "在代理客户端里把 STUN/TURN 的标准端口（3478 / 5349 / 19302）也指向代理，"
             "或者直接开 TUN 全接管。用 FlClash / Clash Verge / ClashX 的话，"
@@ -1876,7 +2006,7 @@ _WEBRTC_SEV = {
     "hidden": "pass",
     "relay": "info",
     "lan": "medium",
-    "leak": "high",
+    "leak": "critical",
     "stale": "info",
     "unknown": "info",
     "empty": "info",
@@ -2343,8 +2473,8 @@ def check_shield() -> list[dict]:
                 "出口断掉没有任何人会提醒你。哨兵是随塔一起安装的菜单栏程序，"
                 "装好塔就一直在。",
                 ev,
-                "重新装一遍 Claude Tower.app（哨兵在它的 Resources 里），"
-                "然后打开塔或直接打开包内的 Claude Shield.app。",
+                "重新装一遍 CC Tower.app（哨兵在它的 Resources 里），"
+                "然后打开塔或直接打开包内的 CC Shield.app。",
             )
         ]
     if not running:
@@ -2356,7 +2486,7 @@ def check_shield() -> list[dict]:
                 "装是装了，现在没跑。可能是被退出了，也可能开机自启没开。"
                 "这段时间里出口断了不会有人告诉你。",
                 ev,
-                "打开 Claude Tower 会自动把它带起来；长期值守建议在哨兵面板里"
+                "打开 CC Tower 会自动把它带起来；长期值守建议在哨兵面板里"
                 "打开「开机自启」。",
             )
         ]
@@ -2383,6 +2513,93 @@ def check_shield() -> list[dict]:
             ev,
         )
     ]
+
+
+def _check_shield_live(live: dict | None = None) -> dict:
+    """哨兵此刻看到的东西。
+
+    塔只在自己被按下时看一眼世界，两次扫描之间发生的事它一概不知道；
+    哨兵每十秒看一次，却只有菜单栏那一小块地方能说话。这一项把两边接上。
+
+    只对**塔自己看不到的**那些扣分。Claude 正在直连公网、代理进程开着却
+    没接管——这两件事是运行时事实，静态扫描怎么扫都扫不出来，只有持续
+    观察能发现。WebRTC / DNS / 时区那几条塔自己有判据（哨兵的证据已经并进
+    对应的条目里），这里只当佐证写出来，不再扣一次分：同一个问题罚两遍，
+    分数就没意义了，用户也会觉得「怎么修都掉血」。
+    """
+    live = shield.live() if live is None else live
+    if not live.get("available"):
+        return _item(
+            "shield.live", "network",
+            "没有哨兵的实时结论", "info",
+            "哨兵没在跑，或者刚装上还没巡检过。这一项不扣分——"
+            "它只是「两次扫描之间发生了什么」的那只眼睛，装没装由上面那条判。",
+            [], "打开 CC Shield.app，它会开始每十秒巡检一次。",
+        )
+    if not live.get("fresh"):
+        age = live.get("age") or 0
+        when = (f"{age // 60} 分钟前" if age >= 60 else f"{max(1, age)} 秒前")
+        return _item(
+            "shield.live", "network",
+            f"哨兵最近一次巡检是{when}", "info",
+            "这份结论已经太旧，不能当现状用。哨兵可能被暂停、被系统休眠，或者进程没了。"
+            "过期的「安全」比没有结论更误导——它盖住的正好是空窗期。",
+            [_ev("距上次巡检", when, mono=True)],
+            "看一眼菜单栏的哨兵图标；如果它已经不在了，重新打开一次。",
+        )
+
+    ev = [
+        _ev("哨兵结论", live.get("verdict") or "-", mono=True),
+        _ev("Claude", "运行中" if live.get("claudeRunning") else "没在跑"),
+        _ev("出口", "在位" if live.get("exitReady") else "不在位"),
+    ]
+    if live.get("age") is not None:
+        age = live["age"]
+        ev.append(_ev("距上次巡检",
+                      f"{age} 秒前" if age < 60 else f"{age // 60} 分钟前", mono=True))
+
+    direct = int(live.get("directConnections") or 0)
+    if direct > 0:
+        return _item(
+            "shield.live", "network",
+            f"Claude 此刻有 {direct} 条公网直连", "high",
+            "哨兵在 Claude 的连接表里看到了绕过代理、直接连公网的 socket。"
+            "这一条静态扫描永远扫不出来：配置文件可以完全正确，运行时却有一条路"
+            "没被接管。那一刻发出的请求带的是真实地址。",
+            ev,
+            "先确认代理的接管方式（TUN / 系统代理）覆盖了这个进程；"
+            "如果刚改过规则，重启 Claude 让它重新建立连接再观察一轮。",
+            tags=["hard-signal"],
+        )
+    if live.get("sessionState") == "waiting":
+        return _item("shield.live", "network", "戒严等待重新准入", "info",
+                     live.get("sessionMessage") or "请在哨兵点击检查并启动 Claude。", ev)
+    if live.get("takeoverMissing"):
+        return _item(
+            "shield.live", "network",
+            "代理在跑，但没接管流量", "medium",
+            "哨兵认到了代理客户端进程，却既没看到 TUN，也没看到系统代理。"
+            "这一刻流量是直连的——和「代理根本没开」不是一回事，后者至少用户知道。",
+            ev,
+            "把客户端的接管打开（TUN 或系统代理），或者退出 Claude 再排查。",
+        )
+    if live.get("verdict") in ("warn", "danger"):
+        # 其余原因（DNS 没接管、WebRTC 暴露、时区漂移）塔自己有判据，
+        # 对应条目已经单独列过。这里只把哨兵的说法记下来当佐证。
+        return _item(
+            "shield.live", "network",
+            f"哨兵此刻在报「{live.get('title') or live.get('verdict')}」", "info",
+            "这一条和上面某一条说的是同一个问题，不重复扣分。"
+            "列在这里是因为哨兵看到的是「现在」，而塔看到的是「扫描那一刻」——"
+            "两边对得上，说明问题还在。",
+            ev,
+        )
+    return _item(
+        "shield.live", "network",
+        "哨兵此刻没有异常", "pass",
+        "持续巡检的结论和这次扫描一致。",
+        ev,
+    )
 
 
 # ---------------------------------------------------------------- 汇总

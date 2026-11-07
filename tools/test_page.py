@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import re
 import shutil
@@ -212,11 +213,137 @@ def main() -> int:
                 js_errors.append(str(ev["params"]["args"])[:160])
 
         checks = []
-        checks.append(("页面标题正确", "魔塔" in (evaluate("document.title") or "")))
+        checks.append(("页面标题正确", "CC Tower" in (evaluate("document.title") or "")))
         checks.append(("令牌已注入", len(evaluate(
             "(document.querySelector('meta[name=cc-token]')||{}).content||''") or "") >= 32))
         checks.append(("window.CC 就绪", evaluate("!!(window.CC && window.CC.api)")))
         checks.append(("window.Tower 就绪", evaluate("!!window.Tower")))
+        checks.append(("四个统一主入口", evaluate("document.querySelectorAll('.primary-tabs .tab').length") == 4))
+        checks.append(("默认进魔塔体检而非游戏遮罩", evaluate("document.querySelector('#panel-tower').classList.contains('active') && document.querySelector('#title').hidden") is True))
+        checks.append(("守护台不再重复出现在主窗口", evaluate("document.querySelector('#panel-home') === null") is True))
+        checks.append(("更新及接口移到设置", evaluate("!!document.querySelector('#panel-settings #update-card') && !!document.querySelector('#panel-settings #sessionapi-card')") is True))
+        checks.append(("操作记录移到记录页", evaluate("!!document.querySelector('#panel-records #history-card')") is True))
+
+        # 导航只剩一层：二级只在魔塔体检下出现，另外三个一级页一页到底。
+        evaluate("window.CC.setUnlocked(true); window.CC.switchTab('tower'); 'ok'")
+        nav = evaluate("""(() => {
+          const subs = [...document.querySelectorAll('.sub-tabs')];
+          return {
+            groups: subs.map(n => n.dataset.group),
+            shown: subs.filter(n => !n.hidden).map(n => n.dataset.group),
+            tower: document.querySelectorAll('.sub-tabs[data-group=tower] .tab').length,
+            inNav: !!document.querySelector('.sub-tabs #open-game'),
+            inTop: !!document.querySelector('.topbar #open-game'),
+          };
+        })()""") or {}
+        checks.append(("二级导航只剩魔塔体检一组", nav.get('groups') == ['tower'], str(nav.get('groups'))))
+        checks.append(("魔塔体检二级收成三项", nav.get('tower') == 3, str(nav.get('tower'))))
+        checks.append(("标题画面按钮在顶栏、不在页签行",
+                       nav.get('inTop') is True and nav.get('inNav') is False))
+
+        # 合并页：一页两种看法，切视图不动页签。
+        seg = evaluate("""(() => {
+          window.CC.switchTab('settle');
+          const before = {
+            settle: !document.querySelector('#view-settle').hidden,
+            findings: document.querySelector('#view-findings').hidden,
+            tab: document.querySelector('.sub-tabs [data-tab=settle]').classList.contains('active'),
+            panel: document.querySelector('#panel-results').classList.contains('active'),
+          };
+          document.querySelector('.viewseg [data-view=findings]').click();
+          const after = {
+            settle: document.querySelector('#view-settle').hidden,
+            findings: !document.querySelector('#view-findings').hidden,
+            tab: document.querySelector('.sub-tabs [data-tab=settle]').classList.contains('active'),
+            seg: document.querySelector('.viewseg [data-view=findings]').classList.contains('on'),
+            panel: document.querySelector('#panel-results').classList.contains('active'),
+          };
+          return {before, after};
+        })()""") or {}
+        before = seg.get('before') or {}
+        after = seg.get('after') or {}
+        checks.append(("结算与详情同属一页，默认按层",
+                       before.get('panel') is True and before.get('settle') is True
+                       and before.get('findings') is True and before.get('tab') is True))
+        checks.append(("切到按类不换页签，只换视图",
+                       after.get('panel') is True and after.get('findings') is True
+                       and after.get('settle') is True and after.get('tab') is True
+                       and after.get('seg') is True))
+
+        # 记录三页、修复两页同理：页内分段，不再占一条菜单行。
+        merged = evaluate("""(() => {
+          window.CC.switchTab('records');
+          const r1 = !document.querySelector('#view-records').hidden
+                  && document.querySelector('#view-cruise').hidden
+                  && document.querySelector('#view-board').hidden;
+          document.querySelector('.viewseg [data-view=board]').click();
+          const r2 = !document.querySelector('#view-board').hidden
+                  && document.querySelector('#view-records').hidden
+                  && document.querySelector('#panel-records').classList.contains('active')
+                  && !document.querySelector('.sub-tabs[data-group=records]');
+          window.CC.switchTab('isolation');
+          const p1 = !document.querySelector('#view-isolation').hidden
+                  && document.querySelector('#view-privacy').hidden
+                  && document.querySelector('#panel-privacy').classList.contains('active')
+                  && !document.querySelector('.sub-tabs[data-group=privacy]');
+          window.CC.switchTab('tower');
+          return {r1, r2, p1};
+        })()""") or {}
+        checks.append(("记录三页合在一页里分段切换", merged.get('r1') is True and merged.get('r2') is True))
+        checks.append(("配置隔离并进修复页", merged.get('p1') is True))
+        # 两边都没有记录时只留一句话：两个「暂无」各占一张卡，看着像没加载出来。
+        # 直接摆好两种列表再调同步函数，不依赖这台机器上真有没有历史。
+        empty = evaluate("""(() => {
+          window.CC.switchTab('records');
+          const g = document.querySelector('#guard-events'), h = document.querySelector('#history-list');
+          g.innerHTML = '<li class="hist-empty">x</li>';
+          h.innerHTML = '<li class="hist-empty">x</li>';
+          syncRecordsEmpty();
+          const line = document.querySelector('#records-empty');
+          const on = {
+            line: !line.hidden,
+            guard: getComputedStyle(document.querySelector('#guard-card')).display === 'none',
+            hist: getComputedStyle(document.querySelector('#history-card')).display === 'none'
+          };
+          h.innerHTML = '<li class="hist-item">x</li>';
+          syncRecordsEmpty();
+          const back = line.hidden
+            && getComputedStyle(document.querySelector('#guard-card')).display !== 'none';
+          h.innerHTML = '';
+          syncRecordsEmpty();
+          return {on, back};
+        })()""") or {}
+        on = empty.get('on') or {}
+        checks.append(("记录页两边都空时并成一句",
+                       on.get('line') is True and on.get('guard') is True and on.get('hist') is True))
+        checks.append(("任一边有记录就恢复两张卡", empty.get('back') is True))
+        # 说明默认收起：正文只留一行结论，机制解释折进「说明」。
+        checks.append(("卡片说明默认收起", evaluate(
+            "[...document.querySelectorAll('.more')].every(d => !d.open)"
+            " && document.querySelectorAll('.more').length >= 8") is True))
+        evaluate("window.CC.switchTab('tower'); 'ok'")
+        # 启动/结束会话已经跟着守护台回到菜单栏面板，主窗口只剩设置页那几个开关。
+        guard_ui = evaluate("""(async()=>{
+          const originalFetch=window.fetch, originalConfirm=window.confirm;
+          const calls=[];
+          let state={ok:true,supported:true,running:true,fresh:true,enabled:true,paused:false,level:2,state:'watch',message:'测试',live:{age:1},hits:[],login:'loaded'};
+          window.fetch=async(url,opts)=>String(url)==='/api/control' ? {ok:true,status:200,json:async()=>{
+            if(opts?.method==='POST'){calls.push(JSON.parse(opts.body));return {ok:true,message:'已接收'};}
+            return state;
+          }} : originalFetch(url,opts);
+          try {
+            await Guard.refresh();
+            const pauseReady=!document.querySelector('#guard-pause').disabled;
+            window.confirm=()=>false;document.querySelector('#guard-pause').click();
+            await new Promise(r=>setTimeout(r,120));
+            const canceled=calls.length;
+            window.confirm=()=>true;document.querySelector('#guard-pause').click();
+            await new Promise(r=>setTimeout(r,160));
+            return {pauseReady,canceled,count:calls.length,action:calls[0]?.action,confirmed:calls[0]?.confirm};
+          } finally {window.fetch=originalFetch;window.confirm=originalConfirm;await Guard.refresh();}
+        })()""") or {}
+        checks.append(("设置页可暂停值守，取消确认则不发送", guard_ui.get('pauseReady') and guard_ui.get('canceled') == 0))
+        checks.append(("确认后只发送一条 pause 指令", guard_ui.get('count') == 1 and guard_ui.get('action') == 'pause' and guard_ui.get('confirmed') is True))
         # 版本号别在测试里写死：从 app.py 里读，改版本时才不会连累这一项
         m_ver = re.search(r'^VERSION\s*=\s*"([^"]+)"', (ROOT / "app.py").read_text(encoding="utf-8"), re.M)
         want_ver = "v" + (m_ver.group(1) if m_ver else "?")
@@ -263,10 +390,16 @@ def main() -> int:
         checks.append(("当前版本的已读记录不再重弹",
                        evaluate("document.querySelector('#notice').hidden") is True))
 
+        evaluate("window.CC.switchTab('tower'); 'ok'")
+        wait_for("document.querySelector('#panel-tower').classList.contains('active')")
+        shot = cdp.call('Page.captureScreenshot', {'format':'png'}).get('result', {})
+        if shot.get('data'):
+            Path('/tmp/unified-tower.png').write_bytes(base64.b64decode(shot['data']))
+
         # 备份与还原卡片要能渲染出来（空列表也得有空状态，不能白屏）
         # 新用户尚未闯关时魔镜会被门禁挡住；只在本页模拟解锁，不写后端进度。
-        evaluate("window.CC.setUnlocked(true); document.querySelector('.tab[data-tab=findings]')"
-                 " && document.querySelector('.tab[data-tab=findings]').click()")
+        evaluate("window.CC.setUnlocked(true); document.querySelector('.viewseg [data-view=findings]')"
+                 " && document.querySelector('.viewseg [data-view=findings]').click()")
         wait_for("((document.querySelector('#restore-list')||{}).innerHTML||'').trim().length > 0")
         box = evaluate("(document.querySelector('#restore-list')||{}).innerHTML||''") or ""
         checks.append(("备份卡片有内容（列表或空状态）", len(box.strip()) > 0, box[:60]))
@@ -353,6 +486,28 @@ def main() -> int:
         checks.append(("首选语言可单独预览", "en-US" in align_ui.get("text", "")))
         checks.append(("改变勾选作废旧对齐预览", align_ui.get("invalidated") is True))
 
+        # 新本机接口卡片：HTTP 完全打桩，确认/取消都不会改真实客户端。
+        session_ui = evaluate("""(async () => {
+          const originalFetch = window.fetch, originalConfirm = window.confirm;
+          const requests = [];
+          window.fetch = async (url, opts) => String(url) === '/api/sessionapi'
+            ? (opts && opts.method === 'POST'
+              ? (requests.push(opts), new Response(JSON.stringify({ok:true,message:'fixture-only'}), {headers:{'Content-Type':'application/json'}}))
+              : new Response(JSON.stringify({ok:true,token:'session-fixture',canApply:true,canUndo:false,message:'fixture'}),{headers:{'Content-Type':'application/json'}}))
+            : originalFetch(url,opts);
+          try {
+            await refreshSessionApi();
+            window.confirm = () => false;
+            await changeSessionApi('apply');
+            const canceled = requests.length === 0;
+            window.confirm = () => true;
+            await changeSessionApi('apply');
+            return {canceled, count:requests.length, token:requests[0].headers['X-CClean-Privacy-Token'], confirmed:JSON.parse(requests[0].body).confirm};
+          } finally {window.fetch=originalFetch;window.confirm=originalConfirm;}
+        })()""") or {}
+        checks.append(("本机监测接口预览取消不写入", session_ui.get('canceled') is True))
+        checks.append(("本机监测接口独立令牌与确认", session_ui.get('count') == 1 and session_ui.get('token') == 'session-fixture' and session_ui.get('confirmed') is True))
+
         # IPv6 出口：只验提示与确认链路，绝不点「确认」（那会真的调 networksetup）
         evaluate("window.CC.switchTab('privacy'); 'ok'")
         # 不能等「文本非空」：#ipv6-status 的初始文案就是「读取 IPv6 状态…」，
@@ -411,7 +566,7 @@ def main() -> int:
             "(document.querySelectorAll('#uninstall-list .un-item')||[]).length") or 0
         checks.append(("卸载清单渲染出条目", un_items >= 5, f"{un_items} 项"))
         checks.append(("卸载清单含本程序自身",
-                       "Claude Tower" in (evaluate(
+                       "CC Tower" in (evaluate(
                            "(document.querySelector('#uninstall-list')||{}).textContent||''") or "")))
         checks.append(("未输入确认串时执行按钮禁用", evaluate(
             "document.querySelector('#uninstall-go').disabled") is True))
@@ -640,7 +795,160 @@ def main() -> int:
                 break
         checks.append(("跨站简单请求打不垮应用", alive))
 
+        goto(url + '?tools=1#privacy:proxyfix-dns-card', READY + " && document.body.classList.contains('tools-only')", "按需维护窗口")
+        tools_ui = evaluate("""(() => {
+          const messages=[];
+          window.webkit={messageHandlers:{host:{postMessage:m=>messages.push(m.action)}}};
+          const privacy=document.querySelector('#panel-privacy').classList.contains('active');
+          const focused=location.hash==='#privacy:proxyfix-dns-card';
+          const noHome=document.querySelector('.primary-tabs [data-tab=home]')===null;
+          window.CC.openToolView('settings');
+          const settings=!document.querySelector('#panel-settings').classList.contains('active');
+          window.CC.openToolView('tower');
+          const tower=document.querySelector('#panel-tower').classList.contains('active');
+          document.querySelector('#brand').click();
+          return {privacy,focused,noHome,settings,tower,messages};
+        })()""") or {}
+        checks.append(("维护窗口直达修复位置，且守护台页签已撤", tools_ui.get('privacy') and tools_ui.get('focused') and tools_ui.get('noHome')))
+        checks.append(("魔塔窗口维护入口转交菜单栏，返回入口接通", tools_ui.get('settings') and tools_ui.get('tower') and tools_ui.get('messages') == ['open-tools','show-monitor']))
+
+        # 菜单栏内工具：先阅读，再按分类选一项；不展示旧窗口与导航。
+        (home / '.ccclean' / 'notice.json').unlink(missing_ok=True)
+        goto(url + '?tools=1&panel=1#index', "!!window.PanelTools && !!document.querySelector('#pt-ack')", "面板内维护工具")
+        wait_for("document.querySelector('#pt-title').textContent==='使用说明与边界'")
+        checks.append(("工具首用保留说明且不提前展示修改表单", evaluate("!document.querySelector('#pt-content #privacy-enable') && !document.querySelector('#pt-content #proxyfix-confirm')") is True))
+        evaluate("document.querySelector('#pt-ack').click(); 'ok'")
+        wait_for("document.querySelector('#pt-title').textContent==='全部工具'")
+        embedded = evaluate("""(async()=>{
+          const messages=[];window.webkit={messageHandlers:{shield:{postMessage:m=>messages.push(m.action)}}};
+          const choices=document.querySelectorAll('#pt-content [data-view]').length;
+          const noShell=getComputedStyle(document.querySelector('.topbar')).display==='none' && document.querySelector('.primary-tabs').getClientRects().length===0;
+          await PanelTools.show('network');const toolList=document.querySelectorAll('#pt-content [data-view]').length;
+          await PanelTools.show('dns');const oneTool=!!document.querySelector('#pt-content #proxyfix-dns-card') && !document.querySelector('#pt-content #ipv6-card');
+          const sharedPreview=!!document.querySelector('#pt-content #proxyfix-preview');
+          const oldFetch=window.fetch;let sent=[];
+          window.fetch=async(u,o)=>{if(String(u)==='/api/proxyfix'&&o?.method==='POST'){sent.push(JSON.parse(o.body));return {ok:true,json:async()=>({ok:true,message:'fixture'})};}return oldFetch(u,o);};
+          try {
+            proxyfixDns={canApply:true,token:'dns-fixture',familyLabel:'同一家解析器',next:['https://example.invalid/dns-query']};
+            document.querySelector('#proxyfix-dns-apply').disabled=false;
+            document.querySelector('#proxyfix-dns-apply').click();
+            const preview=!document.querySelector('#proxyfix-preview').hidden && sent.length===0;
+            document.querySelector('#proxyfix-cancel').click();
+            const canceled=document.querySelector('#proxyfix-preview').hidden && sent.length===0;
+            await PanelTools.show('index');document.querySelector('#pt-back').click();
+            return {choices,noShell,toolList,oneTool,sharedPreview,preview,canceled,messages};
+          } finally {window.fetch=oldFetch;}
+        })()""") or {}
+        checks.append(("工具面板只有五个分类，没有旧窗口外壳", embedded.get('choices')==5 and embedded.get('noShell')))
+        checks.append(("分类只展开单个工具，DNS 预览在当前页", embedded.get('toolList')==5 and embedded.get('oneTool') and embedded.get('sharedPreview')))
+        checks.append(("原 DNS 预览取消不写入且可以返回哨兵", embedded.get('preview') and embedded.get('canceled') and [x for x in (embedded.get('messages') or []) if x not in ('tool-size','tools-ready')]==['back-panel']))
+        for width in (340,420):
+            cdp.call('Emulation.setDeviceMetricsOverride', {'width':width,'height':772,'deviceScaleFactor':1,'mobile':False})
+            await_result=evaluate("(async()=>{await PanelTools.show('dns');return document.documentElement.scrollWidth<=window.innerWidth;})()")
+            checks.append((f"面板内 DNS 工具 {width}px 无横向溢出", await_result is True))
+        evaluate("PanelTools.show('index'); 'ok'")
+        size=evaluate("Math.ceil(document.querySelector('#panel-tools').getBoundingClientRect().height)")
+        shot=cdp.call('Page.captureScreenshot', {'format':'png','clip':{'x':0,'y':0,'width':420,'height':size,'scale':1}}).get('result',{})
+        if shot.get('data'): Path('/tmp/shield-tools-embedded.png').write_bytes(base64.b64decode(shot['data']))
+        cdp.call('Emulation.setDeviceMetricsOverride', {'width':1440,'height':960,'deviceScaleFactor':1,'mobile':False})
+
+        # 原生哨兵页面用假 bridge 渲染和点击；只记录消息，不启动/终止应用。
+        goto((ROOT / 'shield/web/shield.html').as_uri(), "typeof window.SHIELD === 'object'", "加载戒严面板")
+        shield_ui = evaluate("""(() => {
+          const events=[];
+          window.webkit={messageHandlers:{shield:{postMessage:(m)=>events.push(m.action)}}};
+          const fixture={enabled:true,level:2,paused:false,claude:false,verdict:'idle',idleState:'ready',sessionActive:false,sessionMessage:'必须检查后使用',sessionStarting:false};
+          window.SHIELD.update(fixture);
+          const waiting=document.querySelector('#st-title').textContent;
+          const visible=!document.querySelector('#session-panel').hidden;
+          const placed=document.querySelector('#state').contains(document.querySelector('#btn-start'));
+          document.querySelector('#btn-start').click();
+          window.SHIELD.update({...fixture,claude:true,sessionActive:true});
+          const hidden=document.querySelector('#btn-start').hidden;
+          window.confirm=()=>false;
+          document.querySelector('#btn-session-end').click();
+          const canceled=events.length===1;
+          window.confirm=()=>true;
+          document.querySelector('#btn-session-end').click();
+          return {waiting,visible,placed,hidden,canceled,events};
+        })()""") or {}
+        checks.append(("戒严待准入不显示就绪", shield_ui.get('waiting') == '需检查后启动' and shield_ui.get('visible') is True))
+        checks.append(("启动按钮在状态卡上，不用滚到底部", shield_ui.get('placed') is True))
+        checks.append(("戒严检查并启动按钮发送正确动作", (shield_ui.get('events') or [])[:1] == ['session-start']))
+        checks.append(("运行中收起启动按钮，结束前需确认", shield_ui.get('hidden') is True and shield_ui.get('canceled') is True and shield_ui.get('events') == ['session-start','session-end']))
+
         print()
+        classified_ui = evaluate("""(() => {
+          const events=[];
+          window.webkit={messageHandlers:{shield:{postMessage:m=>events.push(m.action)}}};
+          const fixture={enabled:true,level:2,paused:false,claude:false,verdict:'idle',idleState:'ready',sessionActive:false,sessionMessage:'请先检查并启动',sessionStarting:false,
+            tun:true,tunIface:'utun5',sysProxy:true,sessionChecked:true,sessionMode:'global',connectionsState:'unknown',connectionsDetail:'未发现 Claude 桌面进程，尚无连接样本',
+            country:'US',egressMask:'203.0.*.8',egressAt:Date.now()/1000,maskFresh:true,towerData:true,towerState:'ok',
+            dnsChecked:true,dnsFake:true,dns:'198.18.0.64',dnsResolverChecked:true,dnsResolverCountry:'CN',dnsResolverOrg:'示例解析器',dnsResolver:'192.0.*.1',dnsEgressSuspect:true,
+            stunChecked:true,stun:['203.0.*.8'],transportChecked:true,transportState:'ok',transportLabel:'通 · 1392 ms',domainChecked:true,domainState:'ok',domainLabel:'出口一致',
+            tz:'America/New_York',baselineTz:'America/New_York',lastAt:Date.now()/1000,interval:30,hits:[],version:'1.11.1'};
+          window.SHIELD.update(fixture);
+          const groups=document.querySelectorAll('.fact-group').length;
+          const route=getComputedStyle(document.querySelector('#f-route').closest('li'),'::before').content.includes('✓');
+          const warn=getComputedStyle(document.querySelector('#f-dns-egress').closest('li'),'::before').content.includes('!');
+          const unknown=document.querySelector('#f-connections').closest('li').dataset.st !== 'ok';
+          const policy=document.querySelector('#f-policy').textContent==='全局';
+          const local=document.querySelector('[data-group=local]');local.open=false;
+          window.SHIELD.update({...fixture,tzDrift:true});const reveal=local.open;
+          local.open=false;window.SHIELD.update({...fixture,tzDrift:true});const kept=!local.open;
+          document.querySelector('[data-tool=dns]').click();
+          const strict=document.querySelector('#seg [data-lv="2"]').classList.contains('on');
+          window.SHIELD.update({...fixture,level:1});const watch=document.querySelector('#seg [data-lv="1"]').classList.contains('on');
+          window.SHIELD.update({...fixture,sessionChecked:false,sessionMode:''});const unconfirmed=document.querySelector('#f-policy').closest('li').dataset.st==='off';
+          const toolEvents=events.slice();
+          window.SHIELD.update({...fixture,enabled:false,title:'守护中',verdict:'safe'});
+          const disabledSafe=document.querySelector('#st-title').textContent==='已停用' && document.querySelector('#state').dataset.v==='idle';
+          document.querySelector('#btn-pause').click();const resumed=events[events.length-1]==='resume';
+          window.SHIELD.update(fixture);document.body.classList.add('main-window');
+          return {groups,route,warn,unknown,policy,reveal,kept,events:toolEvents,strict,watch,unconfirmed,disabledSafe,resumed};
+        })()""") or {}
+        checks.append(("圆形勾号与警告保留，未确认不算通过", classified_ui.get('groups') == 4 and classified_ui.get('route') and classified_ui.get('warn') and classified_ui.get('unknown')))
+        checks.append(("分类异常自动展开且尊重手动折叠", classified_ui.get('reveal') and classified_ui.get('kept')))
+        checks.append(("实际代理模式区分已读取与未确认", classified_ui.get('policy') and classified_ui.get('unconfirmed')))
+        checks.append(("瞭望戒严选中态与行内工具保留", classified_ui.get('strict') and classified_ui.get('watch') and classified_ui.get('events') == ['repair-dns']))
+        checks.append(("停用不显示安全且可以恢复值守", classified_ui.get('disabledSafe') and classified_ui.get('resumed')))
+        upstream_ui = evaluate("""(() => {
+          window.SHIELD.update({enabled:true,level:2,upstream:true,tun:false,sysProxy:false,tunIface:'en0',
+            claude:false,verdict:'idle',idleState:'ready',sessionActive:false,towerState:'ok',
+            dnsChecked:true,dnsFake:false,dns:'203.0.113.7',dnsResolverChecked:true,dnsResolverCountry:'US',
+            dnsResolver:'203.0.*.1',dnsEgressSuspect:false,stunChecked:true,stun:[],
+            transportChecked:true,transportState:'ok',transportLabel:'已测通',domainChecked:true,domainState:'ok',domainLabel:'出口一致',
+            tz:'Etc/UTC',baselineTz:'Etc/UTC',hits:[]});
+          return {route:document.querySelector('#f-route').closest('li').dataset.st==='off',
+            tun:document.querySelector('#f-tun').closest('li').dataset.st==='off',
+            policy:document.querySelector('#f-policy').textContent.includes('本机不适用'),
+            dns:document.querySelector('#f-dns').textContent.includes('真实地址'),
+            resolver:document.querySelector('#f-dns-egress').closest('li').dataset.st==='ok'};
+        })()""") or {}
+        checks.append(("上游代理无本机 TUN 时仍展示探测结果，本机路由不误报", all(upstream_ui.get(k) for k in ('route','tun','policy','dns','resolver'))))
+        managed_vm_ui = evaluate("""(() => {
+          window.SHIELD.update({enabled:true,level:2,vmManaged:true,vmProtected:true,vmUDPBlocked:true,
+            upstream:false,tun:true,sysProxy:false,tunIface:'utun0',sessionChecked:true,sessionMode:'rule',
+            claude:false,verdict:'idle',idleState:'ready',towerState:'ok',
+            dnsChecked:true,dnsFake:true,dns:'198.19.0.47',dnsResolverChecked:true,dnsResolverCountry:'US',
+            dnsResolver:'203.0.*.1',dnsEgressSuspect:false,stunChecked:false,stun:[],
+            transportChecked:true,transportState:'ok',domainChecked:true,domainState:'ok',
+            tz:'Etc/UTC',baselineTz:'Etc/UTC',hits:[]});
+          return !document.querySelector('#vm-network-row').hidden &&
+            document.querySelector('#f-vm-network').closest('li').dataset.st==='ok' &&
+            document.querySelector('#f-policy').textContent.includes('规则全代理') &&
+            document.querySelector('#f-udp').closest('li').dataset.st==='ok' &&
+            document.querySelector('#btn-upstream').hidden;
+        })()""")
+        checks.append(("虚拟机规则模式、断网保护及 UDP 拒绝结果准确显示", managed_vm_ui is True))
+
+        cdp.call('Emulation.setDeviceMetricsOverride', {'width':420,'height':1000,'deviceScaleFactor':1,'mobile':False})
+        shot=cdp.call('Page.captureScreenshot', {'format':'png','captureBeyondViewport':True}).get('result',{})
+        if shot.get('data'): Path('/tmp/shield-classified-actual.png').write_bytes(base64.b64decode(shot['data']))
+        for width in (340,420):
+            cdp.call('Emulation.setDeviceMetricsOverride', {'width':width,'height':1000,'deviceScaleFactor':1,'mobile':False})
+            checks.append((f"分类面板 {width}px 无横向溢出", evaluate('document.documentElement.scrollWidth <= window.innerWidth') is True))
+
         ok = True
         for item in checks:
             name, cond = item[0], item[1]

@@ -10,6 +10,7 @@
 """
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -315,9 +316,10 @@ class ReachableGateTests(unittest.TestCase):
 
 
 class WebRtcEvidenceTests(unittest.TestCase):
-    def run_with(self, result: dict) -> dict:
+    def run_with(self, result: dict, live: dict | None = None) -> dict:
+        # 不传 live 就等于「没有哨兵证据」——单测不能读用户真实的 shield.json
         with mock.patch.object(scanner.stun, "probe", return_value=result):
-            return scanner._check_webrtc("5.34.*.136")
+            return scanner._check_webrtc("5.34.*.136", {} if live is None else live)
 
     def base(self, **kw) -> dict:
         r = {"ips": ["112.97.32.112", "5.34.220.136"],
@@ -495,7 +497,7 @@ class HardwareFingerprintTests(unittest.TestCase):
     def test_virtual_gpu_is_flagged(self):
         for chip in ("Apple Paravirtual device", "VMware SVGA II", "llvmpipe (LLVM 15.0.7)"):
             out = self.gpu_with(chip)
-            self.assertEqual(out["severity"], "medium", chip)
+            self.assertEqual(out["severity"], "info" if scanner.vmnetwork.enabled() else "medium", chip)
             self.assertIn("虚拟显卡", out["title"])
 
     def test_physical_gpu_passes_with_evidence(self):
@@ -531,7 +533,7 @@ class HardwareFingerprintTests(unittest.TestCase):
     def test_hypervisor_flag_is_medium(self):
         out = self.vm_with("1")
         self.assertEqual(out["id"], "fp.vm")
-        self.assertEqual(out["severity"], "medium")
+        self.assertEqual(out["severity"], "info" if scanner.vmnetwork.enabled() else "medium")
 
     def test_bare_metal_passes(self):
         out = self.vm_with("0")
@@ -639,6 +641,113 @@ class CliInstallTests(unittest.TestCase):
         body = src[src.index("def _probe_residue"):]
         body = body[:body.index("\ndef ")]
         self.assertIn('"cli.claude_code"', body)
+
+
+class ManagedBlockTests(unittest.TestCase):
+    """扫描要跳过本工具自己写的标记块。
+
+    否则「免管理员对齐」刚写进 .zshrc 的 `export TZ=...` 会被当成用户手写的
+    残留，再给一条「注释掉这一行」的修复建议——等于让我们去拆自己刚搭的东西，
+    而且用户照着做之后，`shellenv` 的记录还在、块里却什么都没了。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.rc = self.tmp / ".zshrc"
+        self.patches = [
+            mock.patch.object(scanner, "SHELL_RC", [self.rc]),
+            mock.patch.object(scanner, "HOME", self.tmp),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def scan(self, text, needles=("TZ",)):
+        self.rc.write_text(text, encoding="utf-8")
+        return scanner._scan_shell_rc(list(needles))
+
+    def test_block_content_is_skipped(self):
+        hits = self.scan(
+            'export PATH="$HOME/bin:$PATH"\n'
+            "# >>> ccclean locale env >>>\n"
+            'export TZ="America/New_York"\n'
+            'export LANG="en_US.UTF-8"\n'
+            "# <<< ccclean locale env <<<\n")
+        self.assertEqual(hits, [])
+
+    def test_lines_after_the_block_still_reported_with_real_numbers(self):
+        hits = self.scan(
+            "# >>> ccclean locale env >>>\n"
+            'export TZ="America/New_York"\n'
+            "# <<< ccclean locale env <<<\n"
+            'export TZ="Asia/Shanghai"\n')
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["line"], 4)
+        self.assertIn("Asia/Shanghai", hits[0]["text"])
+
+    def test_proxy_block_is_skipped_too(self):
+        hits = self.scan(
+            "# >>> ccclean terminal proxy >>>\n"
+            'export HTTPS_PROXY="http://127.0.0.1:7890"\n'
+            "# <<< ccclean terminal proxy <<<\n",
+            needles=("PROXY",))
+        self.assertEqual(hits, [])
+
+    def test_unclosed_block_is_not_silenced(self):
+        # 收尾标记被人删了：块里那几行现在真的在生效，该报就得报。
+        # 沉默比误报更难查。
+        hits = self.scan(
+            "# >>> ccclean locale env >>>\n"
+            'export TZ="America/New_York"\n')
+        self.assertEqual(len(hits), 1)
+
+    def test_plain_comments_are_still_ignored(self):
+        hits = self.scan('# export TZ="America/New_York"\n')
+        self.assertEqual(hits, [])
+
+
+class SuffixedItemTests(unittest.TestCase):
+    """带后缀的条目 id 必须能被关卡读到。
+
+    扫描器有几个家族按「哪个文件」分条目：`cred.shell_keys.zshrc`、
+    `cred.settings.settings_json`、`marker.base_url.<域名>`。关卡以前裸写
+    家族名做精确匹配，永远对不上——一条 high 级的「API 密钥明文写在 .zshrc」
+    在关卡上显示成「未发现凭据残留」。这类错误不会报错，只会让危险项消失。
+    """
+
+    def setUp(self):
+        from core import tower
+        self.tower = tower
+
+    def test_prefix_matches_every_member(self):
+        idx = {"cred.shell_keys.zshrc": {"id": "cred.shell_keys.zshrc", "severity": "high"},
+               "cred.shell_keys.bash_profile": {"id": "cred.shell_keys.bash_profile",
+                                                "severity": "low"}}
+        got = self.tower._worst(idx, ["cred.shell_keys.*"])
+        self.assertEqual(got["id"], "cred.shell_keys.zshrc")
+
+    def test_prefix_does_not_leak_to_similar_names(self):
+        idx = {"cred.shell_keys_backup": {"id": "cred.shell_keys_backup", "severity": "high"}}
+        self.assertEqual(self.tower._matches(idx, "cred.shell_keys.*"), [])
+
+    def test_fix_ids_are_real_item_ids(self):
+        idx = {"cred.settings.settings_json": {"id": "cred.settings.settings_json",
+                                               "severity": "critical",
+                                               "fix": {"kind": "json_keys"}}}
+        self.assertEqual(self.tower._fixable_ids(idx, ["cred.settings.*"]),
+                         ["cred.settings.settings_json"])
+
+    def test_credential_stage_is_not_green_when_a_shell_key_exists(self):
+        scan = {"items": [{"id": "cred.shell_keys.zshrc", "severity": "high",
+                           "title": "1 处 shell 配置直接导出了 API 密钥",
+                           "detail": "d", "evidence": [], "advice": "a"}]}
+        out = self.tower._probe_cred(scan, {})
+        self.assertEqual(out["sev"], "high")
+        self.assertNotEqual(out["value"], "未发现凭据残留")
+
+    def test_credential_stage_still_passes_on_a_clean_machine(self):
+        out = self.tower._probe_cred({"items": []}, {})
+        self.assertEqual(out["sev"], "pass")
 
 
 if __name__ == "__main__":

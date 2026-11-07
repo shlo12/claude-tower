@@ -1,0 +1,50 @@
+/* 菜单栏子页：沿用 Shield 色板和密度，不显示旧工具窗口的外壳。 */
+html.embedded-tools { background: #0a0c12; }
+html.embedded-tools body { margin: 0; min-width: 0; background: #0a0c12; color: #e9edf8; font:13px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+html.embedded-tools body > :not(#panel-tools):not(#modal):not(#toast):not(script):not(style):not(svg) { display: none !important; }
+html.embedded-tools #pt-vault, html.embedded-tools [hidden] { display: none !important; }
+#panel-tools { padding:12px; }
+#panel-tools * { box-sizing:border-box; }
+#panel-tools .pt-head { display:flex;align-items:center;gap:9px;padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid #2a3145; }
+#panel-tools .pt-head > button { border:0;background:transparent;color:#e0b45c;font:inherit;padding:0;cursor:pointer; }
+#panel-tools .pt-head strong { font-size:13px;font-weight:600; }
+#panel-tools .pt-head > span { margin-left:auto;font-size:10px;color:#a3adc6; }
+#panel-tools .pt-choice { display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;padding:12px 3px;color:#e9edf8;background:transparent;border:0;border-bottom:1px solid #2a3145;text-align:left;font:inherit;cursor:pointer; }
+#panel-tools .pt-choice strong { display:block;font-size:13px;font-weight:500; }
+#panel-tools .pt-choice small { display:block;font-size:11px;color:#a3adc6;margin-top:2px; }
+#panel-tools .pt-choice small:empty { display:none; }
+#panel-tools .pt-choice:hover { background:#161a25; }
+#panel-tools .card, #panel-tools .panel { display:block;margin:0 !important;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;min-width:0; }
+#panel-tools .card-head { display:flex;align-items:center;gap:6px;padding:0 0 8px;margin:0;border:0;background:transparent; }
+#panel-tools .card-head h3 { display:none; }
+#panel-tools .badge { white-space:normal;font-size:10px; }
+#panel-tools .tool-desc, #panel-tools .help { color:#a3adc6;font-size:11px;line-height:1.7;overflow-wrap:anywhere; }
+#panel-tools .field { margin:12px 0;min-width:0; }
+#panel-tools .field label { font-size:12px; }
+#panel-tools .tool-row { display:flex;flex-wrap:wrap;gap:6px;margin:10px 0; }
+#panel-tools .btn, #panel-tools button, #panel-tools input, #panel-tools select, #panel-tools textarea { max-width:100%;min-width:0;font-size:12px; }
+#panel-tools .btn { padding:6px 9px; }
+#panel-tools .field input, #panel-tools .field select { width:100%; }
+#panel-tools pre, #panel-tools code, #panel-tools p { overflow-wrap:anywhere;word-break:break-word; }
+#panel-tools pre { white-space:pre-wrap;max-width:100%;font-size:11px; }
+#panel-tools .panel-head, #panel-tools .hero { display:none; }
+#panel-tools .iso-grid, #panel-tools .toolcards { display:block; }
+#panel-tools .side-card { margin-top:12px !important; }
+#panel-tools .filterbar { display:flex;flex-wrap:wrap;margin:10px 0 !important; }
+#panel-tools .row-head { flex-wrap:wrap;gap:5px; }
+#panel-tools .pickbar { position:static;display:flex;flex-wrap:wrap;padding:8px;margin:8px 0; }
+#panel-tools .pk-acts { flex-wrap:wrap; }
+#panel-tools .egress-list, #panel-tools .uninstall-list { max-width:100%;overflow-wrap:anywhere; }
+#panel-tools #pt-feedback { margin:10px 0 0;color:#e0b45c;font-size:11px; }
+html.embedded-tools .modal { max-width:calc(100vw - 16px);max-height:calc(100vh - 20px); }
+html.embedded-tools .modal-head, html.embedded-tools .modal-body, html.embedded-tools .modal-foot { padding:10px; }
+html.embedded-tools .modal-foot { flex-wrap:wrap; }
+html.embedded-tools .modal-head h3 { font-size:14px; }
+html.embedded-tools .res-row { min-width:0; }
+html.embedded-tools .toast { max-width:calc(100vw - 20px);white-space:normal; }
+
+#panel-tools #nt-body { padding:0;max-height:none;overflow:visible;font-size:12px; }
+#panel-tools #nt-body h3 { font-size:13px; }
+#panel-tools .row, #panel-tools .row-main, #panel-tools .row-body { max-width:100%;min-width:0;overflow-wrap:anywhere; }
+#panel-tools .row-body { padding:10px; }
+#panel-tools .row-head { padding:9px; }

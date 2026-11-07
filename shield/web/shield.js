@@ -1,4 +1,4 @@
-/* Claude Shield · 哨兵 —— 面板渲染
+/* CC Shield · 哨兵 —— 面板渲染
    全部状态由 Swift 侧推送，页面自己不读系统、不轮询。
    页面只做两件事：把快照画出来、把点击发回去。 */
 
@@ -71,20 +71,46 @@
     S = Object.assign(S, p);
 
     $('#ver').textContent = 'v' + (p.version || '1.0.0');
-    document.body.classList.toggle('paused', !!p.paused);
+    document.body.classList.toggle('paused', !!p.paused || p.enabled === false);
+
+    var strict = p.enabled && !p.paused && Number(p.level) >= 2;
+    document.body.classList.toggle('strict-session', strict);
 
     // ---- 主状态 ----
     var st = $('#state');
     // 待命不等于中立：能启动就给绿灯，缺塔或被挡住就给黄灯。
     // verdict 仍然是 idle（不参与报警），这里只影响状态卡的颜色。
     var v = p.verdict || 'idle';
+    if (strict && !p.sessionActive) v = p.claude ? 'danger' : 'warn';
     if (!p.paused && v === 'idle' && p.idleState === 'ready') v = 'safe';
     if (!p.paused && v === 'idle' && p.idleState && p.idleState !== 'ready') v = 'warn';
+    if (p.enabled === false || p.paused) v = 'idle';
     st.dataset.v = v;
-    $('#st-title').textContent = p.paused ? '已暂停' : (p.title || '待命');
-    $('#st-note').textContent = p.paused
+    $('#st-title').textContent = p.enabled === false ? '已停用' : p.paused ? '已暂停' : (strict && !p.sessionActive ? '需检查后启动' : (p.title || '待命'));
+    $('#st-note').textContent = p.enabled === false ? '哨兵未值守，请点击继续值守后重新检查。' : p.paused
       ? '哨兵暂时下班，这段时间不做任何检查。'
-      : (p.note || '');
+      : (strict && !p.sessionActive ? p.sessionMessage : (p.note || ''));
+
+    // ---- 准入会话 ----
+    // 启动按钮挂在状态卡右上角，不放在下面的会话框里：戒严档下这一屏
+    // 还有四组指标，唯一的启动入口沉在底部，等于要用户先滚一段才找得到。
+    var start = $('#btn-start');
+    start.hidden = !strict || !!p.claude || !!p.sessionActive;
+    start.disabled = !!p.sessionStarting;
+    start.textContent = p.sessionStarting ? '检查中…' : '检查后启动';
+
+    var status = $('#session-status');
+    status.textContent = p.sessionMessage || '请先检查并启动';
+    status.hidden = status.textContent === $('#st-note').textContent;
+
+    // 会话框只负责「正在使用」这一段：结束按钮，加上准入范围说明。
+    var ending = !!p.claude || !!p.sessionActive || !!p.sessionStarting;
+    $('#btn-session-end').hidden = !ending;
+    $('#btn-session-end').disabled = !ending;
+
+    var session = $('#session-panel');
+    session.hidden = !strict;
+    session.classList.toggle('bare', !ending && status.hidden);
 
     // ---- 出口变了 ----
     // 哨兵测到的出口和基线对不上时不直接改基线：跟着新值走，真泄漏
@@ -110,7 +136,7 @@
       ((p.baselineTz || p.egressMask) ? 'ok' : 'missing');
     if (towerState === 'missing') {
       tw.hidden = false;
-      $('#tower-note').textContent = '还没有基线：时区要打开塔扫一次，出口哨兵会自己测。';
+      $('#tower-note').textContent = '还没有基线：时区要打开主窗口扫一次，出口哨兵会自己测。';
     } else if (towerState === 'stale' && !p.egressSeen) {
       // 出口待确认时上面那条横幅已经说清楚了，这里不再叠一句「过期」。
       tw.hidden = false;
@@ -121,7 +147,7 @@
 
     // ---- 塔留下的设置漂移 ----
     // IPv6 被系统/别的工具重新打开，或者分流规则被订阅更新冲掉。
-    // 两件事的修法都在塔里，所以共用一条横幅、一个「打开塔」。
+    // 两件事的修法都在塔里，所以共用一条横幅、一个「打开主窗口」。
     var driftNotes = [];
     if (p.ipv6Drift) {
       driftNotes.push('Wi-Fi 的 IPv6 又被打开了');
@@ -136,7 +162,7 @@
     var dw = $('#drift-warn');
     if (driftNotes.length) {
       dw.hidden = false;
-      $('#drift-note').textContent = driftNotes.join('；') + '。修好在塔里，哨兵不会自己改系统。';
+      $('#drift-note').textContent = driftNotes.join('；') + '。请在魔塔里预览处理，哨兵不会自己改系统。';
     } else {
       dw.hidden = true;
     }
@@ -153,10 +179,17 @@
     // Claude 没在跑不是错误，只是待命：给灰色横杠，不给红叉。
     setFact($('#f-claude'), p.claude ? '运行中' : '未运行', p.claude ? 'ok' : 'off');
 
+    $('#vm-network-row').hidden = !p.vmManaged;
+    if (p.vmManaged) {
+      setFact($('#f-vm-network'), p.vmProtected ? '固定链路 · 已核验' : '未通过', p.vmProtected ? 'ok' : 'bad');
+      $('#f-vm-network').title = p.vmIssue || 'pf 持续限制客机出口；关闭界面不会解除网络保护。';
+    }
     // ---- 出口 ----
     var iface = p.tunIface || '';
     var fr = $('#f-route');
-    if (!iface) {
+    if (p.upstream) {
+      setFact(fr, (iface || '本机路由') + ' · 上游路径未确认', 'off');
+    } else if (!iface) {
       setFact(fr, '没读到', 'off');
     } else if (p.tun) {
       setFact(fr, iface + ' · 隧道', 'ok');
@@ -169,15 +202,20 @@
     fr.title = '发往公网的包实际走哪张网卡。TUN 客户端常把 0/0 拆成更细的前缀，' +
       'default 仍留在 Wi-Fi，所以这里按内核的最长前缀匹配来判，不只读 default。';
 
-    var tunState = p.tun ? 'ok' : p.sysProxy ? 'off' : 'bad';
-    setFact($('#f-tun'), p.tun ? '已接管' : '未接管', tunState);
+    var tunState = p.upstream ? 'off' : p.tun ? 'ok' : p.sysProxy ? 'off' : 'bad';
+    setFact($('#f-tun'), p.upstream ? '本机不适用' : p.tun ? '已接管' : '未接管', tunState);
     // 系统代理未开启不算错：TUN 在位，或者压根没出口时，由上面几行表态。
     var fc = $('#f-connections');
     setFact(fc, p.connectionsState === 'direct' ? '公网物理路由' : p.connectionsState === 'local' ? '本次为本地代理连接' : '未确认', p.connectionsState === 'direct' ? 'bad' : p.connectionsState === 'local' ? 'ok' : 'warn');
     fc.title = p.connectionsDetail || '无法证明全部连接经过代理';
     if (p.connectionsState === 'local') fc.title += '；尚未确认客户端最终使用代理节点还是 DIRECT';
     $('#connections-note').textContent = fc.title;
-    setFact($('#f-proxy'), p.sysProxy ? '已开启' : '未开启', p.sysProxy ? 'ok' : 'off');
+    setFact($('#f-proxy'), p.vmManaged ? 'TUN 接管 · 不要求' : p.sysProxy ? '已开启' : '未开启', p.vmManaged ? 'off' : p.sysProxy ? 'ok' : 'off');
+
+    setFact($('#f-policy'), p.sessionChecked ? (p.sessionMode === 'global' ? '全局' : (p.sessionMode === 'rule' ? '规则' : p.sessionMode || '未知')) : '未确认', p.sessionChecked ? (p.sessionMode === 'global' ? 'ok' : (strict ? 'warn' : 'off')) : 'off');
+    if (p.vmManaged) setFact($('#f-policy'), p.vmProtected ? '规则全代理 · 已核验' : '规则未确认', p.vmProtected ? 'ok' : 'warn');
+    if (p.upstream) setFact($('#f-policy'), '上游模式 · 本机不适用', 'off');
+    $('#f-policy').title = p.upstream ? '上游的运行模式无法通过本机接口确认；准入依赖实测证据。' : p.sessionChecked ? '从正在运行的代理本机接口读取；模式本身不能证明每条连接的路径。' : '无法从本机控制接口确认实际模式；戒严需要这份证据。';
 
     var fe = $('#f-egress');
     if (!p.egressMask) {
@@ -202,7 +240,8 @@
 
     // ---- 解析 ----
     // 出口不在的时候 DNS 和 STUN 都压根没跑：那时候查一次就等于自己泄漏一次。
-    var exitReady = p.tun || p.sysProxy;
+    // 上游开关允许发起探测；每项仍按实际返回证据显示。
+    var exitReady = p.vmManaged ? p.vmProtected && p.tun : p.upstream || p.tun || p.sysProxy;
 
     var dns = $('#f-dns');
     if (!exitReady) {
@@ -211,6 +250,9 @@
     } else if (!p.dnsChecked) {
       setFact(dns, '没查成', 'off');
       dns.title = '这次没拿到结果，不降级判定——网络抖一下就报警，人会很快学会无视通知。';
+    } else if (p.upstream && !p.dnsFake) {
+      setFact(dns, p.dns + '（真实地址）', 'off');
+      dns.title = '上游透明代理不要求 fake-ip；查询成功不等于路径已确认，请结合解析出口与其他准入证据。';
     } else if (p.dnsFake) {
       setFact(dns, '隧道内 · ' + p.dns, 'ok');
       dns.title = 'claude.ai 解析到了假地址（fake-ip），说明 DNS 被客户端接管了。' +
@@ -260,14 +302,17 @@
     if (!exitReady) {
       setFact(udp, '出口不在，没查', 'off');
       udp.title = '只在出口在位时才打 STUN：出口不在的时候发 UDP，等于自己把真实地址送出去。';
+    } else if (p.vmManaged && p.vmUDPBlocked && !ips.length) {
+      setFact(udp, '已阻断 · 规则已核验', 'ok');
+      udp.title = 'root 任务已核验运行中的 UDP 拒绝规则与 pf，实测无回包符合策略。';
     } else if (!p.stunChecked) {
       setFact(udp, '没探到', 'off');
       udp.title = '四个 STUN 节点都没回。一次超时不作结论，也不报警。';
     } else if (p.stunExposed && p.stunExposed.length) {
-      setFact(udp, '暴露 · ' + p.stunExposed.join(' / '), 'warn');
+      setFact(udp, 'STUN 风险 · ' + p.stunExposed.join(' / '), 'warn');
       udp.title = '国内 STUN 节点回了这些地址，和当前出口基线不是同一个。' +
         '分流规则把国内域名放直连，节点回真实地址是「正确答案」；' +
-        '但浏览器的 ICE 候选是交给任何网页的，境外页面同样读得到。' +
+        '使用同类节点的网页可能取得这些地址；是否实际形成 ICE 候选需要浏览器实测确认。' +
         '最省事的做法是拒掉 3478 / 5349 / 19302 的 UDP，不依赖代理组是否支持 UDP。';
     } else if (p.stunLeak) {
       setFact(udp, '分裂 · ' + ips.join(' / '), 'warn');
@@ -349,13 +394,13 @@
 
     // ---- 自动更新 ----
     // 哨兵只负责发现版本。下载、校验、换应用都在塔里做，
-    // 所以这里最多给一个「去塔里更新」，不在菜单栏里动手。
+    // 所以这里最多给一个「打开设置与更新」，不在菜单栏里动手。
     var fu = $('#f-update');
     var up = p.update || {};
     var bu = $('#btn-update');
     if (!up.configured) {
       setFact(fu, '未配置', 'off');
-      fu.title = '塔里还没有填更新源。打开塔 → 隐私设置 → 自动更新。';
+      fu.title = '塔里还没有填更新源。打开魔塔 → 设置 → 自动更新。';
       bu.hidden = true;
     } else if (up.newer) {
       setFact(fu, up.version ? up.version + ' 可用' : '有新版本', 'warn');
@@ -405,7 +450,12 @@
     if (!p.enabled) {
       hint.innerHTML = '已停用。勾选下方「继续值守」才会重新巡检。';
     } else if (Number(p.level) >= 2) {
-      hint.innerHTML = '戒严：启动后检查，出口、DNS、UDP 或时区不达标会请求退出 Claude；运行中出口中断也会终止。<b>不保证检查前没有联网</b>，未保存工作可能丢失。';
+      hint.innerHTML = p.vmManaged ? '戒严：核验现有 mihomo、TUN、固定节点与 pf 断网保护后启动；不要求系统代理或全局模式。节点、规则或保护状态变化会结束本次使用。' : p.upstream
+        ? '戒严 · 上游代理：准入改查边缘出口、HTTPS 传输、DNS、UDP 与时区证据，本机代理机制不作要求。巡检发现上游出口变化会请求退出（同出口节点切换无法识别），未响应时尝试强制终止。<b>不保证检查前没有联网</b>，未保存工作可能丢失。'
+        : '戒严：先检查并启动；缺证据不放行。模式、节点、出口或关键证据变化会请求退出，未响应时尝试强制终止。<b>不保证检查前没有联网</b>，未保存工作可能丢失。';
+      if (p.isVM && !p.upstream) {
+        hint.innerHTML += '<br><br>检测到虚拟化环境：若流量由宿主机或网关接管（本机无需开代理），可开启下方「上游代理」。';
+      }
     } else {
       hint.innerHTML = '瞭望：持续检测并提醒，不会终止 Claude。需要自动拦截时可切换「戒严」。';
     }
@@ -417,8 +467,34 @@
       ? (p.loginBroken ? '自启待修' : '已开机自启')
       : '开机自启';
 
+    var upstream = $('#btn-upstream');
+    upstream.hidden = !!p.vmManaged;
+    upstream.classList.toggle('on', !!p.upstream);
+    upstream.textContent = p.upstream ? '上游代理 · 开' : '上游代理';
+
     var pause = $('#btn-pause');
-    pause.textContent = p.paused ? '继续值守' : '暂停 30 分钟';
+    pause.textContent = p.paused || p.enabled === false ? '继续值守' : '暂停 30 分钟';
+
+    document.querySelectorAll('.fact-group').forEach(function (group) {
+      var counts = {ok:0,warn:0,bad:0,off:0};
+      group.querySelectorAll('.facts li').forEach(function (row) {
+        if (row.hidden) return;
+        counts[row.dataset.st || 'off'] += 1;
+        var action = row.querySelector('.fact-action');
+        if (action) action.hidden = row.dataset.st !== 'warn' && row.dataset.st !== 'bad';
+      });
+      var summary = group.querySelector('.group-status');
+      summary.dataset.st = counts.bad ? 'bad' : counts.warn ? 'warn' : 'off';
+      var parts = [];
+      if (counts.bad + counts.warn) parts.push((counts.bad + counts.warn) + ' 项需处理');
+      if (counts.ok) parts.push(counts.ok + ' 项通过');
+      if (counts.off) parts.push(counts.off + ' 项未确认');
+      summary.textContent = parts.join(' · ');
+      // 首次出现新异常才展开；用户手动折叠后，正常推送不会把它反复撑开。
+      var issue = counts.bad ? 'bad' : counts.warn ? 'warn' : '';
+      if (issue && group.dataset.issue !== issue) group.open = true;
+      group.dataset.issue = issue;
+    });
 
     // ---- 命中记录 ----
     var list = $('#hits');
@@ -490,6 +566,7 @@
         }
         return;
       }
+      if (lv === 1 && S.claude && Number(S.level) >= 2 && !confirm('切换为瞭望会结束本次戒严使用并退出 Claude，未保存内容可能丢失。继续？')) return;
       post({ action: 'level', value: lv });
     });
   });
@@ -504,9 +581,17 @@
     post({ action: 'transport' });
   });
   $('#btn-egress').addEventListener('click', function () { post({ action: 'confirm-egress' }); });
+
+  document.querySelectorAll('[data-tool]').forEach(function (button) {
+    button.addEventListener('click', function () { post({action: button.dataset.tool === 'dns' ? 'repair-dns' : 'repair-udp'}); });
+  });
   $('#btn-open').addEventListener('click', function () { post({ action: 'opentower' }); });
   $('#btn-tower').addEventListener('click', function () { post({ action: 'opentower' }); });
   $('#btn-drift').addEventListener('click', function () { post({ action: 'opentower' }); });
+  $('#btn-upstream').addEventListener('click', function () {
+    if (!S.upstream && !confirm('上游代理模式用于虚拟机、路由器透明代理等「本机看不到代理机制」的环境。\n\n开启后戒严不再要求本机系统代理、TUN 与全局模式，改以 Claude 边缘出口、HTTPS 传输、DNS、UDP 与时区为准入证据。\n\n若本机其实需要开代理才能安全访问 Claude，请不要开启。确认开启？')) return;
+    post({ action: 'upstream' });
+  });
   $('#btn-relogin').addEventListener('click', function () { post({ action: 'login' }); });
   $('#btn-update').addEventListener('click', function () { post({ action: 'update' }); });
   $('#btn-login').addEventListener('click', function () { post({ action: 'login' }); });
@@ -514,9 +599,17 @@
   // 改时区会弹系统密码框，那就是确认步骤本身，不再加一次二次点击
   $('#btn-fixtz').addEventListener('click', function () { post({ action: 'fixtz' }); });
   $('#btn-pause').addEventListener('click', function () {
-    post(S.paused ? { action: 'resume' } : { action: 'pause', minutes: 30 });
+    if (!S.paused && S.claude && Number(S.level) >= 2 && !confirm('暂停值守会先退出 Claude，未保存内容可能丢失。继续？')) return;
+    post(S.paused || S.enabled === false ? { action: 'resume' } : { action: 'pause', minutes: 30 });
   });
-  $('#btn-quit').addEventListener('click', function () { post({ action: 'quit' }); });
+  $('#btn-quit').addEventListener('click', function () {
+    if (S.claude && Number(S.level) >= 2 && !confirm('退出哨兵会先退出本次戒严使用的 Claude，未保存内容可能丢失。继续？')) return;
+    post({ action: 'quit' });
+  });
 
   window.SHIELD = { update: render };
+  $('#btn-start').addEventListener('click', function () { if (!this.disabled) post({action: 'session-start'}); });
+  $('#btn-session-end').addEventListener('click', function () {
+    if (confirm('结束本次使用会退出 Claude，未保存内容可能丢失。确认继续？')) post({action: 'session-end'});
+  });
 })();

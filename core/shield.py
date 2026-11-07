@@ -1,4 +1,4 @@
-"""与 Claude Shield 共用的状态文件。
+"""与 CC Shield 共用的状态文件。
 
 基线（时区、出口国家、打码后的出口 IP）两边都会写：塔在扫描后写一次，
 哨兵每天用 Claude 边缘的 trace 结果自己续期——不开塔也不会过期。
@@ -22,6 +22,8 @@ WebRTC 泄漏唯一不需要联网就能做的判据，而且不必把真实 IP 
 from __future__ import annotations
 
 import json
+import functools
+import threading
 import os
 import subprocess
 import sys
@@ -40,11 +42,11 @@ LAUNCH_PLIST = HOME / "Library" / "LaunchAgents" / f"{LAUNCH_LABEL}.plist"
 # 塔可以放在 /Applications，也可以放在 ~/Applications；哨兵嵌在塔的
 # Resources 里，跟着宿主一起装、一起走。
 TOWER_APP_PATHS = (
-    Path("/Applications/Claude Tower.app"),
-    HOME / "Applications/Claude Tower.app",
+    Path("/Applications/CC Tower.app"),
+    HOME / "Applications/CC Tower.app",
 )
 APP_PATHS = tuple(
-    p / "Contents" / "Resources" / "Claude Shield.app" for p in TOWER_APP_PATHS
+    p / "Contents" / "Resources" / "CC Shield.app" for p in TOWER_APP_PATHS
 )
 
 
@@ -75,7 +77,7 @@ def running() -> bool:
         return False
     if r.returncode != 0:
         return False
-    return any("Claude Shield.app/Contents/MacOS/Shield" in line
+    return any("CC Shield.app/Contents/MacOS/Shield" in line
                for line in r.stdout.splitlines())
 
 
@@ -127,6 +129,30 @@ def _clear_seen(data: dict, at: int) -> bool:
     return True
 
 
+_STATE_MUTEX = threading.Lock()
+
+
+def _transaction(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            with _STATE_MUTEX:
+                STATE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+                fd = os.open(STATE_FILE.parent / 'shield-state.lock', flags, 0o600)
+                try:
+                    if sys.platform != 'win32':
+                        import fcntl
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    return fn(*args, **kwargs)
+                finally:
+                    os.close(fd)
+        except OSError:
+            return False
+    return wrapped
+
+
+@_transaction
 def write_baseline(scan: dict | None) -> bool:
     """把这一轮检测到的时区、出口国家与出口 IP 写给 Shield。没有变化就不写盘。
 
@@ -144,6 +170,9 @@ def write_baseline(scan: dict | None) -> bool:
         return False
 
     data = read()
+    if (data.get("enabled", True) and data.get("level") in (2, 3)
+            and (data.get("live") or {}).get("sessionState") in ("active", "checking", "ending")):
+        return False
     now = int(time.time())
     changed = False
     if data.get("version") != VERSION:
@@ -185,6 +214,7 @@ def write_baseline(scan: dict | None) -> bool:
     return _write(data)
 
 
+@_transaction
 def clear_rule_guard() -> bool:
     """撤销分流修复时把规则清单一起删掉。
 
@@ -197,6 +227,7 @@ def clear_rule_guard() -> bool:
     return _write(data)
 
 
+@_transaction
 def record_rule_guard(client: str, name: str, path, rules) -> bool:
     """把这次分流修复写下的规则记给哨兵。
 
@@ -243,5 +274,83 @@ def status() -> dict:
             "level": 2 if data.get("level") in (2, 3) else 1,
             "launchAgent": launch_agent_state(),
         },
+        "live": live(),
         "file": str(STATE_FILE).replace(str(HOME), "~"),
     }
+
+
+# 哨兵多久没写 live 就当它不在看了。它平时 10–30 秒一轮，120 秒一次心跳，
+# 所以 10 分钟已经是「三轮心跳都没来」。
+LIVE_TTL = 600
+
+
+def _int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _strs(value, limit: int) -> list[str]:
+    """只留短字符串。这个文件可能是手改的，不能假设里面一定是列表。"""
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value[:limit]:
+        text = str(item or "").strip()[:64]
+        if text:
+            out.append(text)
+    return out
+
+
+def live() -> dict:
+    """哨兵最近一轮巡检的结论。没有就是空的，绝不替它编一个。
+
+    `fresh` 是这一项的全部价值所在：哨兵的结论只对「刚才」有效。超过
+    `LIVE_TTL` 没更新（暂停、被系统休眠、进程没了）就一律当没有——拿一份
+    几小时前的「安全」当现状，正好把最该知道的空窗期盖住。
+    """
+    raw = read().get("live")
+    out = {
+        "sessionState": "", "sessionMessage": "",
+        "available": False, "fresh": False, "age": None,
+        "verdict": "", "title": "", "note": "",
+        "claudeRunning": False, "exitReady": False, "directConnections": 0,
+        "takeoverMissing": False, "tzDrift": False,
+        "dnsSuspect": False, "dnsEgressSuspect": False,
+        "stunLeak": False, "stunExposed": [],
+        "ruleDrift": False, "ruleMissing": [], "ipv6Drift": False,
+        "transportState": "", "domainState": "", "domainLabel": "",
+    }
+    if not isinstance(raw, dict):
+        return out
+    at = raw.get("at")
+    if not isinstance(at, (int, float)) or at <= 0:
+        return out
+    age = max(0, int(time.time() - at))
+    out.update({
+        "available": True,
+        "sessionState": str(raw.get("sessionState") or "")[:16],
+        "sessionMessage": str(raw.get("sessionMessage") or "")[:240],
+        "age": age,
+        "fresh": age <= LIVE_TTL,
+        "verdict": str(raw.get("verdict") or "")[:16],
+        "title": str(raw.get("title") or "")[:200],
+        "note": str(raw.get("note") or "")[:400],
+        "claudeRunning": bool(raw.get("claudeRunning")),
+        "exitReady": bool(raw.get("exitReady")),
+        "directConnections": _int(raw.get("directConnections")),
+        "takeoverMissing": bool(raw.get("takeoverMissing")),
+        "tzDrift": bool(raw.get("tzDrift")),
+        "dnsSuspect": bool(raw.get("dnsSuspect")),
+        "dnsEgressSuspect": bool(raw.get("dnsEgressSuspect")),
+        "stunLeak": bool(raw.get("stunLeak")),
+        "stunExposed": _strs(raw.get("stunExposed"), 4),
+        "ruleDrift": bool(raw.get("ruleDrift")),
+        "ruleMissing": _strs(raw.get("ruleMissing"), 8),
+        "ipv6Drift": bool(raw.get("ipv6Drift")),
+        "transportState": str(raw.get("transportState") or "")[:16],
+        "domainState": str(raw.get("domainState") or "")[:16],
+        "domainLabel": str(raw.get("domainLabel") or "")[:80],
+    })
+    return out

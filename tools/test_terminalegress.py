@@ -240,5 +240,161 @@ class CheckTests(unittest.TestCase):
         self.assertNotIn("203.0.113.9", repr(item))
 
 
+class ParseEnvTests(unittest.TestCase):
+    """登录 shell 的环境变量：只取白名单里的那几个。
+
+    `env` 的输出里什么都有，包括 API 密钥。白名单之外的一个字都不能进来。
+    """
+
+    def test_only_whitelisted_keys(self):
+        tail = ("@TZ=America/New_York\n@LANG=en_US.UTF-8\n"
+                "@LC_ALL=en_US.UTF-8\n@LANGUAGE=en:zh\n"
+                "@ANTHROPIC_API_KEY=sk-ant-secret\n@PATH=/usr/bin")
+        env = terminalegress.parse_env(tail)
+        self.assertEqual(env["TZ"], "America/New_York")
+        self.assertEqual(env["LANG"], "en_US.UTF-8")
+        self.assertEqual(env["LANGUAGE"], "en:zh")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("PATH", env)
+
+    def test_proxy_lines_are_not_env(self):
+        # 代理那一组没有 @ 前缀，不能被当成时区/语言读进来
+        env = terminalegress.parse_env("HTTPS_PROXY=present\n@TZ=UTC\n")
+        self.assertEqual(env, {"TZ": "UTC"})
+
+    def test_language_is_not_confused_with_lang(self):
+        env = terminalegress.parse_env("@LANGUAGE=en_US\n@LANG=ja_JP.UTF-8\n")
+        self.assertEqual(env["LANGUAGE"], "en_US")
+        self.assertEqual(env["LANG"], "ja_JP.UTF-8")
+
+    def test_value_is_truncated(self):
+        env = terminalegress.parse_env("@LANG=" + "x" * 200 + "\n")
+        self.assertEqual(len(env["LANG"]), 64)
+
+    def test_garbage_is_ignored(self):
+        self.assertEqual(terminalegress.parse_env(""), {})
+        self.assertEqual(terminalegress.parse_env("@TZ\n@=x\n"), {})
+
+    def test_probe_carries_env_even_when_curl_fails(self):
+        # curl 挂了也要带环境回来：时区/语言和网络通不通没关系
+        text = "curl: (28) timed out\n" + terminalegress.MARKER + "\n@TZ=UTC\n@LANG=en_US.UTF-8"
+        out = terminalegress.probe(runner=lambda argv: text)
+        self.assertFalse(out["checked"])
+        self.assertEqual(out["env"]["TZ"], "UTC")
+        self.assertEqual(out["env"]["LANG"], "en_US.UTF-8")
+
+
+class ShellEnvTests(unittest.TestCase):
+    """登录 shell 里 Claude 会继承到的时区/语言。
+
+    这一项是「免管理员对齐」唯一的验收方式：它写进 rc 的东西到底生没生效，
+    别的地方都看不出来。所以判据要钉死，尤其是三个「看起来一样其实不一样」：
+    TZ 未设置=跟随系统、LC_ALL 压过 LANG、LANGUAGE 压过 LANG。
+    """
+
+    EGRESS = {"available": True, "ip": "203.0.113.9", "ip_masked": "203.0.*.9"}
+
+    def run_with(self, env: dict, tz="America/New_York", sys_tz="America/New_York",
+                 target=None, ran=True):
+        tgt = target if target is not None else {
+            "country": "US", "source": "expected", "timezone": tz,
+            "lang": "en_US.UTF-8", "lcAll": "en_US.UTF-8",
+            "resolved": bool(tz and "en_US.UTF-8"),
+        }
+        probe = {"ran": ran, "result": {"shell": "zsh", "env": env, "checked": True}}
+        with mock.patch.object(deep.shellenv, "target", return_value=tgt), \
+                mock.patch.object(deep.compat, "timezone_name", return_value=sys_tz):
+            return deep.check_shell_env(self.EGRESS, probe)
+
+    def test_no_egress_does_not_run_a_shell(self):
+        with mock.patch.object(terminalegress, "probe") as probe:
+            item = deep.check_shell_env({"available": False})
+        probe.assert_not_called()
+        self.assertEqual(item["severity"], "info")
+        self.assertEqual(item["id"], "locale.shell_env")
+
+    def test_matching_env_is_pass(self):
+        item = self.run_with({"TZ": "America/New_York", "LANG": "en_US.UTF-8"})
+        self.assertEqual(item["severity"], "pass")
+
+    def test_unset_tz_follows_the_system(self):
+        # TZ 没设就是跟随系统。系统时区对得上就不该报。
+        item = self.run_with({"LANG": "en_US.UTF-8"}, sys_tz="America/New_York")
+        self.assertEqual(item["severity"], "pass")
+        ev = {e["label"]: e["value"] for e in item["evidence"]}
+        self.assertIn("跟随系统", ev["TZ"])
+
+    def test_system_tz_mismatch_is_not_this_items_business(self):
+        # TZ 没设、系统时区又不对：那是 net.tz_mismatch 的地盘。
+        # 这里再报一次等于一个毛病扣两遍分。
+        item = self.run_with({"LANG": "en_US.UTF-8"}, sys_tz="Asia/Shanghai")
+        self.assertEqual(item["severity"], "pass")
+
+    def test_neutral_locale_is_not_a_problem(self):
+        # C / POSIX 是「没有区域」，不是「某个国家的区域」。它不泄露任何
+        # 中文特征，把它判成「与目标不符」会天天误报。
+        for value in ("C.UTF-8", "C", "POSIX", ""):
+            item = self.run_with({"TZ": "America/New_York", "LANG": value})
+            self.assertEqual(item["severity"], "pass", value)
+
+    def test_other_language_is_low(self):
+        item = self.run_with({"TZ": "America/New_York", "LANG": "ja_JP.UTF-8"})
+        self.assertEqual(item["severity"], "low")
+        self.assertIn("ja_JP.UTF-8", item["detail"])
+
+    def test_wrong_tz_is_medium(self):
+        item = self.run_with({"TZ": "Asia/Shanghai", "LANG": "en_US.UTF-8"})
+        self.assertEqual(item["severity"], "medium")
+        self.assertIn("Asia/Shanghai", item["detail"])
+        self.assertIn("America/New_York", item["detail"])
+
+    def test_chinese_lang_is_medium(self):
+        item = self.run_with({"TZ": "America/New_York", "LANG": "zh_CN.UTF-8"})
+        self.assertEqual(item["severity"], "medium")
+        self.assertIn("zh_CN.UTF-8", item["detail"])
+
+    def test_locale_suffix_is_not_a_difference(self):
+        # en_US.utf8 和 en_US.UTF-8 是同一个语言
+        item = self.run_with({"TZ": "America/New_York", "LANG": "en_US.utf8"})
+        self.assertEqual(item["severity"], "pass")
+
+    def test_lc_all_overrides_lang(self):
+        # POSIX：LC_ALL 压过 LANG。只看 LANG 会把这一条判成通过。
+        item = self.run_with({"TZ": "America/New_York",
+                              "LANG": "en_US.UTF-8", "LC_ALL": "zh_CN.UTF-8"})
+        self.assertEqual(item["severity"], "medium")
+        self.assertIn("zh_CN.UTF-8", item["detail"])
+
+    def test_language_chain_overrides_lang(self):
+        # gettext 的优先级链：LANG 是英文，LANGUAGE 里还有中文，界面照样中文
+        item = self.run_with({"TZ": "America/New_York",
+                              "LANG": "en_US.UTF-8", "LANGUAGE": "zh_CN:en"})
+        self.assertEqual(item["severity"], "medium")
+        self.assertIn("LANGUAGE", item["detail"])
+
+    def test_unresolvable_target_is_info_not_failure(self):
+        item = self.run_with({"TZ": "UTC"}, target={
+            "country": "", "source": "", "timezone": "", "lang": "",
+            "lcAll": "", "resolved": False})
+        self.assertEqual(item["severity"], "info")
+        self.assertIn("没有目标值", item["title"])
+
+    def test_empty_env_is_info(self):
+        item = self.run_with({})
+        self.assertEqual(item["severity"], "info")
+        self.assertIn("没读到", item["title"])
+
+    def test_platform_error_is_carried_into_the_detail(self):
+        # 非 macOS 上 probe 会回「只在 macOS 上跑登录 shell」，
+        # 这句要跟着上来，否则用户看到的是「没回环境变量」这种没头没脑的话
+        probe = {"ran": True, "result": {"shell": "zsh", "env": {},
+                                         "checked": False,
+                                         "error": "只在 macOS 上跑登录 shell"}}
+        with mock.patch.object(deep.shellenv, "target") as tgt:
+            item = deep.check_shell_env(self.EGRESS, probe)
+        tgt.assert_not_called()
+        self.assertIn("只在 macOS 上跑登录 shell", item["detail"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -221,15 +221,15 @@ class FallbackCheckTests(unittest.TestCase):
         self.assertIn("最终规则直接放行", item["title"])
         self.assertIn("真实地址", item["detail"])
 
-    def test_claude_rule_to_direct_default_member_is_high(self):
+    def test_claude_rule_to_direct_default_member_is_not_confirmed_direct(self):
         text = LIVE_LIKE.replace(
             '  - name: "YKKCLOUD"\n    type: select\n    proxies:\n'
             '      - "Fallback"\n      - "HK"',
             '  - name: "YKKCLOUD"\n    type: select\n    proxies:\n'
             '      - "DIRECT"\n      - "HK"').replace("MATCH,YKKCLOUD", "MATCH,HK")
         item = deep.check_proxy_fallback(inspect(text))
-        self.assertEqual(item["severity"], "high")
-        self.assertIn("Claude 规则指向直连", item["title"])
+        self.assertNotEqual(item["severity"], "high")
+        self.assertEqual(inspect(text)["defaultDirect"], [])
 
     def test_unreachable_group_is_only_low(self):
         text = (LIVE_LIKE.replace("MATCH,YKKCLOUD", "MATCH,HK")
@@ -471,8 +471,12 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(merged["value"], "high")
 
     def test_ids_are_declared_in_tower(self):
+        # 断成员而不是断整行：这一条曾经因为「多了一个 id」就失败，
+        # 而真正要保证的是「这三个 id 都在 _PROXY_EXTRAS 里，别漏读」。
         tw = (self.SRC / "core/tower.py").read_text(encoding="utf-8")
-        self.assertIn('_PROXY_EXTRAS = ("net.proxy_fallback", "net.terminal_egress")', tw)
+        line = next((x for x in tw.splitlines() if x.startswith("_PROXY_EXTRAS")), "")
+        for iid in ("net.proxy_fallback", "net.proxy_drift", "net.terminal_egress"):
+            self.assertIn(f'"{iid}"', line)
 
     def test_module_only_reads(self):
         src = (self.SRC / "core/proxyguard.py").read_text(encoding="utf-8")

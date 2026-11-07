@@ -4,7 +4,7 @@
 - 勇者：直接复制 web/assets/knight-t{0..3}.png，按阶位中文名重命名
 - 怪物：复刻 web/tower.js 里 sprite() 的渲染（8x8 网格 + 调色板 + tint + 罩光），
   渲染成 128x128 PNG；文件名带关卡号、怪物名、sprite 种类
-- 产出：<下载目录>/claude-tower-素材包/  +  清单.md
+- 产出：<下载目录>/cc-tower-素材包/  +  清单.md
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from core import tower  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
-OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "Downloads" / "claude-tower-素材包"
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "Downloads" / "cc-tower-素材包"
 SIZE = 128  # 8x8 网格放大到 128x128
 
 # 与 web/tower.js SPRITES 一一对应（8x8 网格）
@@ -114,7 +114,7 @@ def main() -> None:
     mob_dir.mkdir(parents=True, exist_ok=True)
 
     tiers = ['布衣勇者', '铁盔剑士', '缨盔骑士', '传说勇者']
-    manifest = ["# Claude Tower · 像素素材清单", "",
+    manifest = ["# CC Tower · 像素素材清单", "",
                 "## 勇者（4 阶，按击杀数升阶）", "",
                 "| 文件 | 阶位 | 触发条件 |", "| --- | --- | --- |"]
     for i, name in enumerate(tiers):

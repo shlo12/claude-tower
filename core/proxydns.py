@@ -25,7 +25,7 @@ import ipaddress
 import re
 from pathlib import Path
 
-from . import compat
+from . import compat, vmnetwork
 
 # 国内公共解析器。与关卡里原本的名单保持一致，另加常见的 DoH 域名——
 # 只认写死的 IP 会漏掉 `https://doh.pub/dns-query` 这类写法。
@@ -460,6 +460,9 @@ def _pick_config(root: Path) -> Path | None:
 
 def _roots(specs) -> list[tuple[Path, str, tuple, tuple]]:
     out = []
+    specs = list(specs)
+    if vmnetwork.enabled():
+        specs.append(('/usr/local/etc/mihomo', 'mihomo VM', ('mihomo',), ()))
     for rel, name, keys, exclude in specs:
         path = Path(rel)
         out.append((path if path.is_absolute() else compat.HOME / rel, name, keys, exclude))

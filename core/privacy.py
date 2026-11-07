@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import compat, telemetry
+from . import compat, history, telemetry
 
 CONFIG = Path.home() / ".claude/settings.json"
 STATE = Path.home() / ".ccclean/privacy-state.json"
@@ -163,4 +163,6 @@ def apply(enable):
             elif CONFIG.exists() or data:
                 _write(CONFIG, data)
             STATE.unlink()
+        history.log("privacy.apply", target="遥测屏蔽",
+                    ok=True, detail="已开启" if enable else "已关闭")
         return status()

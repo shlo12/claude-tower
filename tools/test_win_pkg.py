@@ -5,8 +5,8 @@
 那几类问题在这里拦住：运行时缺文件、标准库不全、启动器没指向内置运行时、
 模块漏打、中文文件名没打 UTF-8 标记。
 
-    python3 tools/test_win_pkg.py dist/ClaudeTower-2.9.5-windows-src.zip
-    python3 tools/test_win_pkg.py dist/ClaudeTower-2.9.5-windows-src/    # 也可传目录
+    python3 tools/test_win_pkg.py dist/CCTower-2.9.5-windows-src.zip
+    python3 tools/test_win_pkg.py dist/CCTower-2.9.5-windows-src/    # 也可传目录
 """
 
 from __future__ import annotations
@@ -81,8 +81,9 @@ def main(argv: list[str]) -> int:
     print(f"检查 {path.name}")
 
     print("\n[1] 启动必需的文件")
-    for rel in ("Claude Tower.bat", "app.py", "core/__init__.py", "web/index.html",
-                "web/app.js", "web/tower.js", "web/style.css"):
+    for rel in ("CC Tower.bat", "app.py", "core/__init__.py", "web/index.html",
+                "web/app.js", "web/tower.js", "web/style.css", "WindowsShield.exe",
+                "Install.cmd", "windows/shield/WindowsShield.cs", "windows/README.md"):
         check(f"{rel} 存在", pkg.has(rel))
 
     print("\n[2] 内置运行时")
@@ -101,8 +102,11 @@ def main(argv: list[str]) -> int:
     check("标准库不是空壳", len(names) > 400, f"只有 {len(names)} 项")
 
     print("\n[3] 启动器指向内置运行时")
-    bat = pkg.read("Claude Tower.bat").decode("utf-8", "replace")
+    bat = pkg.read("CC Tower.bat").decode("utf-8", "replace")
     check("优先用 runtime\\python\\python.exe", "runtime\\python\\python.exe" in bat)
+    check("原生哨兵是默认入口，工具单独打开", "WindowsShield.exe" in bat and "--tools" in bat)
+    pe = pkg.read("WindowsShield.exe")
+    check("哨兵包含 Windows PE 头", pe[:2] == b"MZ" and b"PE\x00\x00" in pe[:512])
     check("内置运行时缺失时退回系统 python", "where python" in bat)
     check("启动失败时不闪退", "pause" in bat)
 

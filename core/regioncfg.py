@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import compat
+from . import compat, history
 
 STATE = Path.home() / ".ccclean/region.json"
 DOMAIN = "NSGlobalDomain"
@@ -182,6 +182,8 @@ def apply(region: str, locale: str = "") -> dict:
         "region": code,
         "locale": target,
     })
+    history.log("region.apply", target=f"区域格式 {code}", ok=True,
+                detail=f"{raw} → {target}")
     return {**status(),
             "message": f"区域格式已从 {raw} 改成 {target}；重启应用或重新登录后生效。"}
 
@@ -199,4 +201,6 @@ def restore() -> dict:
     if not _write_locale(previous):
         raise RuntimeError(f"写回 {previous} 没有生效；系统可能拦截了 defaults 写入。记录保留。")
     STATE.unlink(missing_ok=True)
+    history.log("region.restore", target="区域格式", ok=True,
+                detail=f"恢复为 {previous}")
     return {**status(), "message": f"区域格式已恢复为 {previous}；重启应用或重新登录后生效。"}

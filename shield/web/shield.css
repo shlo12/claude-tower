@@ -1,5 +1,5 @@
 /* ============================================================
-   Claude Shield · 哨兵
+   CC Shield · 哨兵
    ------------------------------------------------------------
    token 与 web/style.css 的 :root 逐项对齐。两个程序必须看起来是
    同一个世界观——改了那边记得同步这里，tools/check.py 会比对。
@@ -56,6 +56,27 @@ body {
   padding: 12px 12px 10px;
   height: 100vh;
 }
+
+/* 顶栏和底栏固定，中间自己滚。
+   屏幕矮的时候（笔记本 + 大 Dock，可用高度只剩七百出头）必须这样：
+   让整个文档滚，底栏会被推到屏幕外——「瞭望/戒严」和「退出」就点不到了。
+   这里不再用 min-height: 100vh + height: auto，那样等于放弃这条约束。 */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 滚动条收窄，别在暗色面板里横插一道亮条 */
+  scrollbar-width: thin;
+}
+.scroll::-webkit-scrollbar { width: 6px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border-radius: 3px;
+}
+.scroll::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------------- 顶栏 ---------------- */
 
@@ -143,12 +164,21 @@ header button.open:active {
 
 .state {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 12px 13px 13px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+/* 结论和说明占满剩下的宽度；按钮再长也不许把标题挤成两行。 */
+.state-body {
+  flex: 1;
+  min-width: 0;
 }
 
 /* 左侧那道 2px 竖条是状态色，其余部分保持中性——
@@ -183,6 +213,33 @@ header button.open:active {
   line-height: 1.55;
   color: var(--text-2);
 }
+
+/* 状态卡右上角的启动按钮。和顶栏「打开魔塔」同一套金底墨字：
+   面板里只有这两处是「按了就会真的动手」的入口，样式统一才不会认错。 */
+.state-act {
+  flex: none;
+  padding: 7px 11px;
+  font: 600 11px/1 -apple-system, "PingFang SC", sans-serif;
+  color: #1a1205;
+  white-space: nowrap;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  border: 1px solid rgba(255, 233, 190, .55);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 0 10px rgba(224, 180, 92, .18);
+  cursor: pointer;
+  transition: filter .15s, box-shadow .15s, transform .06s;
+}
+
+.state-act[hidden] { display: none; }
+
+.state-act:hover {
+  filter: brightness(1.07);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4), 0 0 14px rgba(224, 180, 92, .34);
+}
+
+.state-act:active { transform: translateY(1px); filter: brightness(.97); }
+
+.state-act:disabled { opacity: .55; cursor: default; filter: none; transform: none; }
 
 /* ---------------- 缺塔提醒 ---------------- */
 
@@ -513,7 +570,7 @@ button.fix[hidden] { display: none; }
 
 .acts {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 6px;
 }
 
@@ -653,3 +710,47 @@ body.paused .state { opacity: .62; }
 body.paused .facts { opacity: .62; }
 
 .connections-note { font-size: 11px; line-height: 1.5; color: var(--text-3); margin: 0; }
+
+.session { margin: 8px 0; padding: 10px; border: 1px solid var(--border); }
+.session-actions { display: flex; gap: 8px; }
+.session-actions button { flex: 1; }
+
+/* 启动按钮搬到状态卡之后，会话框在「还没开始」时只剩一条折叠说明。
+   框是给按钮用的，一个折叠标题包在框里看着像渲染坏了，所以裸着放。 */
+.session.bare { margin: 0; padding: 0; border: 0; background: transparent; }
+.session.bare details { margin-top: 0; }
+
+.session { flex-shrink: 0; border-radius: var(--radius); background: var(--bg-2); }
+.session p { margin: 0 0 8px; font-size: 11px; color: var(--text-2); }
+.session details { margin-top: 8px; font-size: 10px; color: var(--text-3); }
+.session summary { cursor: pointer; }
+.session-actions button { padding: 9px 0; }
+.session-actions button:disabled { opacity: .45; cursor: default; }
+body.strict-session .hits { min-height: 0; max-height: none; }
+
+
+/* 指标行与强度选择保持原样；分类只改变组织方式。
+   注意：这里不能再把 .wrap 改成 height:auto / min-height:100vh——
+   那会让底栏跟着内容往下跑，屏幕矮的时候直接滚出屏幕外。 */
+.fact-groups { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); }
+.fact-group + .fact-group { border-top: 1px solid var(--border); }
+.fact-group > summary { padding: 6px 9px; color: var(--text); background: var(--surface); font-size: 11px; cursor: pointer; }
+.fact-group > summary::marker { color: var(--text-3); }
+.group-status { float: right; color: var(--text-2); font-size: 10px; }
+.group-status[data-st="warn"] { color: var(--gold); }
+.group-status[data-st="bad"] { color: var(--critical); }
+.fact-group .facts { border: 0; border-radius: 0; background: transparent; }
+.fact-group .facts li { min-height: 29px; }
+.fact-group .facts li:last-child { border-bottom: 0; }
+.fact-action { flex: none; background: transparent; border: 0; color: var(--gold); font: inherit; font-size: 10px; padding: 2px 0 2px 5px; cursor: pointer; }
+.fact-action[hidden] { display: none; }
+.facts li[data-st="bad"] .fact-action { color: var(--critical); }
+.session-actions button[hidden] { display: none; }
+.session-actions button { flex: 1; }
+.hits { flex: none; }
+.hits > summary { color: var(--text-2); font-size: 11px; cursor: pointer; }
+.hits ul { max-height: 132px; margin-top: 5px; }
+.acts { grid-template-columns: repeat(5, 1fr); }
+@media(max-width: 360px) { .facts li { padding: 5px 7px; } .fact-action { font-size: 10px; } }
+
+.facts li[hidden], .flat[hidden] { display: none; }

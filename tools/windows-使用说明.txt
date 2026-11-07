@@ -1,10 +1,8 @@
-Claude Tower · Windows 11 x64 便携版
-1. 将整个 ZIP 解压到可写文件夹，不要直接在压缩包内运行。
-2. 双击 Claude Tower.bat，终端窗口会启动本地服务，浏览器自动打开页面。
-3. 保留终端窗口；关闭窗口会停止程序。runtime、core、web 必须留在原目录。
-自带 Python，不是安装器，也不是独立 EXE。哨兵和 macOS 专用设置在 Windows 不提供。
-若安全软件提示异常，请核对下载来源和 SHA256；不要直接关闭安全软件或为整个目录添加排除规则。
-部分检测需要联网；第三方诊断目标能看到请求出口 IP。本地状态在 %USERPROFILE%\.ccclean。
-清理前查看预览，不留副本项目无法还原。榜单保留作者提供的 35 天个人战绩。
-本包尚未经过真实 Windows 11 实机验收，建议作为 Pre-release 测试。
-第三方 Python 运行时许可证见 runtime\python\LICENSE.txt。
+CC Tower 2.25.0 + Windows Shield 1.0.0 · 测试版
+1. 完整解压 ZIP。双击 Install.cmd 安装到当前用户应用目录并创建快捷方式，无需管理员权限；也可直接运行 WindowsShield.exe。
+2. 原生哨兵默认瞭望；右下角系统匣图标可打开面板，关面板不会退出。主动切换戒严之前，请先配置本机代理控制 API、密钥与 Claude.exe，正常退出 Claude，再使用“检查后启动”。
+3. 首版要求 Windows 内运行兼容 Mihomo API 的客户端，系统代理、TUN、全局模式和可验证的单一出口。不会借用宿主机 TUN 证据，也不适用于 macOS 固定链路虚拟机方案。
+4. “体检与维护”才会打开 Python 本地服务；保持它的终端打开。原生哨兵独立于此服务。
+5. 详细能力、配置方法及限制见 windows\README.md。交叉编译及共用策略测试通过，尚未完成 Windows 11 实机验收；请勿视为正式稳定版。
+自带 Python，无需额外安装。不要在 ZIP 内运行，也不要拆散 runtime、core、web、windows、tools。
+核对下载来源和 SHA256；不要关闭安全软件。许可及第三方运行时说明随包附带。

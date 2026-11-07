@@ -56,8 +56,13 @@ _DEVICES: tuple[tuple[str, str, float], ...] = (
     # 两者都只在真机 UA / UA-CH model 里出现，普通浏览器串里不会有。
     (r"xiaomi|redmi|\bpoco\b|\bm2\d{3}[a-z0-9]+\b|\b2\d{6,7}[a-z]{1,3}\b",
      "小米 / 红米", 0.6),
-    (r"oppo|\bpd[a-z]m\d{2}\b", "OPPO", 0.6),
-    (r"vivo|\bv2\d{3}[a-z]{1,2}\b", "vivo", 0.6),
+    # OPPO 的机型码有三代写法：PD 系（PDEM10）、P+两位字母+M 系（PFZM10 /
+    # PEWM00）、P+两位字母+三位数字（PHK110 / PJV110）。以前只写了 PD 系，
+    # Find X / Reno 这些主力机型全漏。反过来的风险是误伤：SM-（三星）、
+    # VOG-（华为）、LE/IN（一加）、RMX（真我）都不以 P 开头，实测不冲突。
+    (r"\boppo\b|\bp[a-z]{2}(?:m\d{2}|\d{3})\b", "OPPO", 0.6),
+    # `\bvivo\b` 不能写成裸 `vivo`：华硕 VivoBook 的 UA 里就有，那是笔记本。
+    (r"\bvivo\b|\bv2\d{3}[a-z]{1,2}\b", "vivo", 0.6),
     (r"realme|\brmx\d{4}\b", "真我", 0.6),
     (r"oneplus", "一加", 0.6),
     (r"\blenovo\b|\bzuk\b", "联想", 0.5),

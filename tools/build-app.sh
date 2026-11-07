@@ -1,10 +1,10 @@
 #!/bin/sh
-# 构建 Claude Tower.app（原生 macOS 应用包）
+# 构建 CC Tower.app（原生 macOS 应用包）
 set -eu
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$DIR/build"
-APP="$DIR/Claude Tower.app"
+APP="$DIR/CC Tower.app"
 CONTENTS="$APP/Contents"
 
 echo "→ 清理旧构建"
@@ -33,10 +33,10 @@ echo "→ 编译宿主程序（arm64 + x86_64 通用）"
 # 的老接口，没有 macOS 13 才有的东西，没必要把门槛抬高——抬高了对方双击就一句
 # 「此版本不能与此版本的 macOS 配合使用」，连个解释都没有。
 swiftc -O -file-prefix-map "$DIR"=. -debug-prefix-map "$DIR"=. -target arm64-apple-macosx11.0 -framework Cocoa -framework WebKit \
-    "$DIR/tools/CCcleanApp.swift" \
+    "$DIR/tools/UserEnvironment.swift" "$DIR/tools/CCcleanApp.swift" \
     -o "$BUILD/CCclean-arm64"
 swiftc -O -file-prefix-map "$DIR"=. -debug-prefix-map "$DIR"=. -target x86_64-apple-macosx11.0 -framework Cocoa -framework WebKit \
-    "$DIR/tools/CCcleanApp.swift" \
+    "$DIR/tools/UserEnvironment.swift" "$DIR/tools/CCcleanApp.swift" \
     -o "$BUILD/CCclean-x86_64"
 lipo -create -output "$CONTENTS/MacOS/CCclean" "$BUILD/CCclean-arm64" "$BUILD/CCclean-x86_64"
 rm -f "$BUILD/CCclean-arm64" "$BUILD/CCclean-x86_64"
@@ -49,6 +49,11 @@ cp -R "$DIR/core" "$CONTENTS/Resources/app/"
 cp -R "$DIR/web" "$CONTENTS/Resources/app/"
 find "$CONTENTS/Resources/app" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
+# 许可证和第三方说明必须随二进制一起发出去：AGPL 要求分发时附带许可全文，
+# 用户也得能在应用包里直接找到自己拿到的是什么授权、里面有哪些第三方组件。
+cp "$DIR/LICENSE" "$CONTENTS/Resources/LICENSE"
+cp "$DIR/THIRD_PARTY_NOTICES.md" "$CONTENTS/Resources/THIRD_PARTY_NOTICES.md"
+
 echo "→ 内置 Python 运行时（对方机器上可能一个 python3 都没有）"
 for arch in arm64 x86_64; do
   "$DIR/tools/python-runtime.sh" "$arch" "$BUILD/py-$arch"
@@ -60,7 +65,14 @@ echo "→ 构建哨兵并嵌进 Resources（一个 .app、两个进程）"
 # 哨兵是独立的菜单栏程序（LSUIElement），但必须跟着塔一起发出去：
 # 单独放一个 .app 在 /Applications 里，用户会不知道要先开哪个、更新时
 # 两个包还会各走各的。嵌在塔里，用户在 Finder 里看到的仍然只有一个图标。
-"$DIR/tools/build-shield.sh" "$CONTENTS/Resources/Claude Shield.app"
+"$DIR/tools/build-shield.sh" "$CONTENTS/Resources/CC Shield.app"
+
+if [ -f "$DIR/vm-profile.json" ]; then
+  cp "$DIR/vm-profile.json" "$CONTENTS/Resources/vm-profile.json"
+  cp "$DIR/vm-profile.json" "$CONTENTS/Resources/app/vm-profile.json"
+  mkdir -p "$CONTENTS/Resources/vm-network-tools"
+  cp "$DIR/tools/vm-network-guard.py" "$DIR/tools/install-vm-network.py" "$CONTENTS/Resources/vm-network-tools/"
+fi
 
 cp "$DIR/tools/Info.plist" "$CONTENTS/Info.plist"
 

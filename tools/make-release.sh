@@ -6,7 +6,7 @@
 #   tools/make-release.sh notes.md        # 把这份 Markdown 写进 Release 和清单
 #
 # 产物在 dist/release-vX.Y.Z/：
-#   ClaudeTower-X.Y.Z.zip     塔（里面嵌着 Claude Shield.app）
+#   CCTower-X.Y.Z.zip     塔（里面嵌着 CC Shield.app）
 #   update-manifest.json      体积、SHA256、最低系统版本、内置哨兵版本
 #
 # 两个文件必须一起上传到同一个 GitHub Release，少一个塔就拒绝更新。
@@ -32,9 +32,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 
 echo "→ 打包（保留中文文件名标记与可执行位）"
-python3 "$DIR/tools/pack_zip.py" "$DIR/Claude Tower.app" \
-  "$OUT/ClaudeTower-$VERSION.zip"
-python3 "$DIR/tools/check_release.py" "$OUT/ClaudeTower-$VERSION.zip"
+python3 "$DIR/tools/pack_zip.py" "$DIR/CC Tower.app" \
+  "$OUT/CCTower-$VERSION.zip"
+python3 "$DIR/tools/check_release.py" "$OUT/CCTower-$VERSION.zip"
 
 echo "→ 生成更新清单"
 python3 - "$OUT" "$VERSION" "$SHIELD_VERSION" "${NOTES_FILE:-}" <<'PY'
@@ -51,7 +51,7 @@ if notes_file:
     notes = Path(notes_file).read_text(encoding="utf-8")[:4000]
 
 assets = {}
-name = f"ClaudeTower-{version}.zip"
+name = f"CCTower-{version}.zip"
 data = (out / name).read_bytes()
 assets["tower"] = {
     "name": name,
@@ -72,8 +72,8 @@ manifest = {
     encoding="utf-8")
 print(f"  {assets['tower']['name']}  {assets['tower']['bytes'] / 1048576:.1f} MB")
 PY
-python3 "$DIR/tools/pack-source.py" "$OUT/ClaudeTower-$VERSION-source.zip"
-python3 "$DIR/tools/check_release.py" --source --history "$OUT/ClaudeTower-$VERSION.zip" "$OUT/ClaudeTower-$VERSION-source.zip"
+python3 "$DIR/tools/pack-source.py" "$OUT/CCTower-$VERSION-source.zip"
+python3 "$DIR/tools/check_release.py" --source --history "$OUT/CCTower-$VERSION.zip" "$OUT/CCTower-$VERSION-source.zip"
 python3 - "$OUT" <<'PY'
 import hashlib, sys
 from pathlib import Path
@@ -88,7 +88,7 @@ ls -lh "$OUT" | sed 's/^/  /'
 echo
 echo "下一步（需要已登录 gh）："
 echo "  gh release create \"v$VERSION\" \\"
-echo "    \"$OUT/ClaudeTower-$VERSION.zip\" \\"
+echo "    \"$OUT/CCTower-$VERSION.zip\" \\"
 echo "    \"$OUT/update-manifest.json\" \\"
 echo "    --title \"v$VERSION\" --notes-file <说明.md>"
 echo

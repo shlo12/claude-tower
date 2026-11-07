@@ -1,13 +1,19 @@
 #!/bin/bash
-# Claude Tower · Windows 分发包
-# 打成 zip 发给 Windows 机器，解压后双击「Claude Tower.bat」即可。
+# CC Tower · Windows 分发包
+# 打成 zip 发给 Windows 机器，解压后双击「CC Tower.bat」即可。
 # 包里自带 Python 运行时，对方不需要安装任何东西。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 tools/check_release.py --source
 
 VER=$(python3 -c "import re;print(re.search(r'VERSION\\s*=\\s*\"([^\"]+)\"', open('app.py').read()).group(1))")
-OUT="dist/ClaudeTower-${VER}-windows-src"
+SHIELD_EXE="build/windows/WindowsShield.exe"
+if [ ! -f "$SHIELD_EXE" ]; then
+  echo "缺少 Windows 原生哨兵，请先在 Windows 运行 windows/shield/build.cmd 或使用交叉编译工具。" >&2
+  exit 1
+fi
+python3 tools/windows_shield_artifact.py "$SHIELD_EXE"
+OUT="dist/CCTower-${VER}-windows-src"
 # 上一版挪走而不是删掉（理由同 make-dist.sh），清理由 tools/clean-build.sh 做
 if [ -e "$OUT" ] || [ -e "$OUT.zip" ]; then
   TRASH="$(mktemp -d "build/trash-dist-$(date +%Y%m%d-%H%M%S)-XXXX")"
@@ -19,7 +25,15 @@ mkdir -p "$OUT"
 
 # 只带运行需要的：后端 + 前端 + 启动器 + 说明
 cp -R app.py core web "$OUT/"
-cp "Claude Tower.bat" "$OUT/"
+cp "CC Tower.bat" "$OUT/"
+cp "$SHIELD_EXE" "$OUT/WindowsShield.exe"
+cp build/windows/WindowsShield.build.json "$OUT/windows-shield-build.json"
+cp windows/Install.cmd "$OUT/Install.cmd"
+mkdir -p "$OUT/windows/shield"
+cp windows/shield/*.cs windows/shield/Probe.ps1 windows/shield/build.cmd windows/shield/app.manifest "$OUT/windows/shield/"
+cp windows/README.md "$OUT/windows/README.md"
+# 许可证与第三方说明随包走：AGPL 要求分发时附带许可全文
+cp LICENSE THIRD_PARTY_NOTICES.md "$OUT/"
 mkdir -p "$OUT/tools"
 cp tools/build-windows.bat tools/windows-使用说明.txt "$OUT/tools/" 2>/dev/null || true
 
@@ -39,4 +53,4 @@ python3 tools/test_win_pkg.py "$OUT.zip" || exit 1
 python3 tools/check_release.py "$OUT.zip"
 
 echo "✓ Windows 分发包 → $OUT.zip ($(du -sh "$OUT.zip" | cut -f1))"
-echo "  对方解压后双击「Claude Tower.bat」即可，不需要装 Python"
+echo "  对方解压后双击「CC Tower.bat」即可，不需要装 Python"

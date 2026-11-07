@@ -1,6 +1,8 @@
 import Cocoa
 
-// Claude Shield 的入口。
+UserEnvironment.normalizeCurrentProcess()
+
+// CC Shield 的入口。
 //
 // 多文件编译时只有 main.swift 允许顶层代码——把这三行放进 ShieldApp.swift
 // 会直接报 "expressions are not allowed at the top level"。
@@ -20,12 +22,17 @@ if CommandLine.arguments.contains("--probe-dump") {
                          maskFresh: fresh, egressPending: pending,
                          ruleGuard: cfg.ruleGuard,
                          forceStun: true, forceFresh: true,
-                         forceTransport: true)
+                         forceTransport: true, upstream: cfg.upstream)
+    let live = Config.Live.from(snap)
     let payload: [String: Any] = [
         "verdict": snap.verdict.rawValue,
         "title": snap.title,
         "note": snap.note,
         "claude": snap.claudeRunning,
+        "vmManaged": snap.vmManaged,
+        "vmProtected": snap.vmNetwork.issue == nil,
+        "vmIssue": snap.vmNetwork.issue ?? "",
+        "vmUDPBlocked": snap.vmNetwork.fresh && snap.vmNetwork.udpBlocked && snap.vmNetwork.pfVerified,
         "tun": snap.tunUp,
         "tunIface": snap.tunIface,
         "sysProxy": snap.sysProxy,
@@ -59,6 +66,23 @@ if CommandLine.arguments.contains("--probe-dump") {
         "domainLabel": snap.domainLabel,
         "domainDetail": snap.domainDetail,
         "domainAt": snap.domainAt,
+        // 塔要读的那一份。和真正落盘的是同一个构造函数，所以这里能直接
+        // 验证「塔会看到的字段」有没有漏。
+        "live": [
+            "at": live.at,
+            "verdict": live.verdict,
+            "claudeRunning": live.claudeRunning,
+            "exitReady": live.exitReady,
+            "directConnections": live.directConnections,
+            "takeoverMissing": live.takeoverMissing,
+            "tzDrift": live.tzDrift,
+            "dnsSuspect": live.dnsSuspect,
+            "dnsEgressSuspect": live.dnsEgressSuspect,
+            "stunLeak": live.stunLeak,
+            "stunExposed": live.stunExposed,
+            "ruleDrift": live.ruleDrift,
+            "ipv6Drift": live.ipv6Drift,
+        ],
         "egressMask": snap.egressMask,
         "maskFresh": snap.maskFresh,
         // 哨兵自己测到的出口只以打码形式出终端：这个输出常被重定向到文件。

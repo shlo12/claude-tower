@@ -1,0 +1,37 @@
+name: Windows Shield
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile native tray application
+        shell: cmd
+        run: windows\shield\build.cmd
+      - name: Test native policy, DPAPI and signature checks
+        shell: powershell
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'shield-tests.json'
+          $p = Start-Process windows\shield\WindowsShield.exe -ArgumentList ('--self-test '+[char]34+$result+[char]34) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'Native tests failed' }
+          $report = Get-Content -Raw $result | ConvertFrom-Json
+          if (-not $report.ok -or $report.checks -lt 45) { throw 'Incomplete test report' }
+          $report | ConvertTo-Json
+      - name: Verify unconfigured environment fails closed
+        shell: powershell
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'shield-probe.json'
+          $p = Start-Process windows\shield\WindowsShield.exe -ArgumentList ('--probe-report '+[char]34+$result+[char]34) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'Native probe failed' }
+          $report = Get-Content -Raw $result | ConvertFrom-Json
+          if ($report.controller -or [string]::IsNullOrEmpty($report.issue)) { throw 'Unconfigured environment passed' }
+          $report | ConvertTo-Json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WindowsShield-test-build
+          path: |
+            windows/shield/WindowsShield.exe
+            ${{ runner.temp }}/shield-tests.json
+            ${{ runner.temp }}/shield-probe.json

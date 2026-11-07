@@ -1,5 +1,5 @@
 /* ============================================================
-   Claude Tower · 像素地牢主题
+   CC Tower · 像素地牢主题
    ============================================================ */
 
 :root {
@@ -74,12 +74,17 @@ code { font-family: var(--mono); font-size: .92em; background: rgba(255, 255, 25
 
 .topbar {
   position: sticky; top: 0; z-index: 40;
-  display: flex; align-items: center; gap: 12px;
-  padding: 11px 22px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 16px;
   background: linear-gradient(180deg, #12161f, #0d1017);
   border-bottom: var(--px) solid #000;
   box-shadow: 0 2px 0 rgba(224, 180, 92, .16);
 }
+/* 顶栏挤在一行里，任何一处换行都会把整条撑成两行——所以全部不折行。 */
+.topbar .brand-name,
+.topbar .tab,
+.verdict { white-space: nowrap; }
+.topbar .tab { flex: none; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .logo {
   width: 30px; height: 30px; flex: none;
@@ -91,18 +96,47 @@ code { font-family: var(--mono); font-size: .92em; background: rgba(255, 255, 25
 }
 .logo svg { width: 18px; height: 18px; }
 .brand-name {
-  font-size: 15px; font-weight: 800; letter-spacing: .14em;
+  font-size: 12.5px; font-weight: 800; letter-spacing: .08em;
   color: var(--gold-2);
   text-shadow: 0 2px 0 #000, 0 0 14px rgba(224, 180, 92, .35);
 }
 .brand-sub { font-size: 11px; color: var(--text-3); letter-spacing: .08em; }
 .spacer { flex: 1; }
 
+/* 顶栏里的主导航。不再是一整条带外框的横栏——那是第二层「你在哪个程序里」，
+   和 logo 说的是同一件事，两行加起来 138px。收进顶栏之后只剩一行 56px。 */
+.tabs.inline {
+  margin: 0; padding: 0; gap: 2px;
+  background: none; border: 0; box-shadow: none;
+  flex-wrap: nowrap;
+}
+.tabs.inline .tab { padding: 6px 11px; font-size: 12px; letter-spacing: .03em; }
+
+/* 哨兵结论。塔和菜单栏面板说的是同一句话，用同一套颜色。 */
+.verdict {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 9px;
+  border: var(--px) solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, .28);
+  font-size: 11.5px; color: var(--text-2);
+  white-space: nowrap;
+}
+.verdict i { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+.verdict[data-v="pass"] { color: var(--pass); border-color: rgba(79, 191, 122, .42); }
+.verdict[data-v="pass"] i { background: var(--pass); }
+.verdict[data-v="warn"] { color: var(--gold); border-color: rgba(224, 180, 92, .45); }
+.verdict[data-v="warn"] i { background: var(--gold); }
+.verdict[data-v="bad"] { color: var(--critical); border-color: rgba(224, 82, 82, .45); }
+.verdict[data-v="bad"] i { background: var(--critical); }
+
 /* ---------------- 按钮 ---------------- */
 
 .btn {
   display: inline-flex; align-items: center; gap: 7px;
   height: 34px; padding: 0 14px;
+  white-space: nowrap;
+  flex: none;
   border-radius: var(--radius);
   border: var(--px) solid var(--border-2);
   background: linear-gradient(180deg, #262d3e, #1a2030);
@@ -171,18 +205,65 @@ code { font-family: var(--mono); font-size: .92em; background: rgba(255, 255, 25
 }
 .tab.active .n { background: rgba(224, 180, 92, .22); color: var(--gold-2); }
 
+/* 二级页签贴着内容走，不再是一条独立的导航横栏。
+   以前它和主导航长得一模一样，等于同一个层级画了两遍。 */
+.sub-tabs {
+  margin: 0 0 12px;
+  padding: 2px 0;
+  gap: 2px;
+  background: none;
+  border: 0;
+  border-bottom: var(--px) solid var(--border);
+  box-shadow: none;
+}
+.sub-tabs .tab { padding: 5px 10px; font-size: 12px; letter-spacing: .02em; border-radius: 0; }
+.sub-tabs .tab.active { background: none; border-color: transparent; box-shadow: inset 0 -2px 0 var(--gold); }
+
+/* 页内视图切换：合并后的页面用它代替原来那条二级页签。
+   刻意和页签长得不一样——药丸分段控件读作「这一页的两种看法」，
+   底下带下划线的那条才是「另一个页面」。两者长一样才会显得菜单有三级。 */
+.viewseg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  margin: 0 0 14px;
+  background: rgba(255, 255, 255, .045);
+  border: var(--px) solid var(--border);
+  border-radius: 999px;
+}
+.viewseg button {
+  padding: 5px 13px;
+  font: 500 12px/1.4 -apple-system, "PingFang SC", sans-serif;
+  color: var(--text-2);
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color .15s, background .15s;
+}
+.viewseg button:hover { color: var(--text); }
+.viewseg button.on {
+  color: #17120a;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35);
+}
+.viewseg .n {
+  display: inline-block; min-width: 16px; height: 15px; line-height: 15px;
+  margin-left: 5px; padding: 0 4px;
+  font-family: var(--mono); font-size: 10px;
+  color: inherit; background: rgba(0, 0, 0, .16); border-radius: 2px; text-align: center;
+}
+.view[hidden] { display: none; }
+
+/* 页面里的一行操作条：一句说明 + 右侧按钮。
+   取代原来的「大写英文小标 + 22px 大标题 + 一段副标题」三行块。 */
+.bar { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; }
+.bar .bar-note { margin: 0; font-size: 12px; color: var(--text-3); min-width: 0; }
+.bar .bar-actions { margin-left: auto; display: flex; gap: 8px; flex: none; }
+
 .panel { display: none; }
 .panel.active { display: block; animation: fade .22s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-
-.panel-head { display: flex; align-items: flex-end; gap: 14px; margin: 4px 0 16px; }
-.panel-head .ph-kicker {
-  font-family: var(--mono); font-size: 10px; letter-spacing: .22em;
-  color: var(--gold); text-transform: uppercase;
-}
-.panel-head h1 { margin: 3px 0 0; font-size: 22px; letter-spacing: .02em; text-shadow: 0 2px 0 rgba(0, 0, 0, .6); }
-.panel-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--text-2); max-width: 62ch; }
-.panel-head .ph-side { margin-left: auto; }
 
 /* ---------------- 卡片 ---------------- */
 
@@ -1394,12 +1475,6 @@ code { font-family: var(--mono); font-size: .92em; background: rgba(255, 255, 25
 .vr-txt span { color: rgba(255, 255, 255, .6); font-size: 12px; }
 
 /* ---------------- 勇士榜 ---------------- */
-
-.board-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
-.board-kicker { font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em; color: var(--accent); }
-.board-title { margin: 4px 0 4px; font-size: 24px; letter-spacing: -.5px; }
-.board-sub { margin: 0; font-size: 12.5px; color: var(--text-2); }
-.board-side { margin-left: auto; }
 
 .board-table {
   background: var(--surface); border: 1px solid var(--border);
@@ -2619,6 +2694,33 @@ body.camp-on { overflow: hidden; }
 .toolcards { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
 .toolcard { padding: 14px 16px; }
 .tool-desc { margin: 6px 0 10px; font-size: 12px; color: var(--text-3); line-height: 1.7; }
+
+/* 卡片说明：一句结论留在外面，其余折进「说明」。
+   一页四五张卡、每张两三行灰字，正文还没看就先是一片文字墙。留下的
+   lead 必须是「动手前非知道不可」的那句——会重启、会断网、要授权、
+   删了能不能找回。剩下的机制解释可以点开再看。 */
+.lead { margin: 6px 0 8px; font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.more { margin: 0 0 10px; }
+.more > summary {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--text-3); cursor: pointer;
+  list-style: none; padding: 1px 0;
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::before {
+  content: "?";
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; flex: none;
+  font-size: 9px; line-height: 1;
+  border: 1px solid var(--border-2); border-radius: 50%;
+  transition: border-color .15s, color .15s;
+}
+.more > summary:hover { color: var(--text-2); }
+.more > summary:hover::before { border-color: var(--text-3); }
+.more[open] > summary { color: var(--text-2); }
+.more[open] > summary::before { content: "−"; border-color: var(--text-3); }
+.more .tool-desc:first-of-type { margin-top: 8px; }
+.more .tool-desc:last-of-type { margin-bottom: 0; }
 .tool-row { display: flex; align-items: center; gap: 10px; }
 .tool-addr { font-size: 11.5px; color: var(--gold); }
 .watch-log {
@@ -2748,6 +2850,20 @@ body.camp-on { overflow: hidden; }
   box-shadow: 2px 2px 0 rgba(0, 0, 0, .35);
 }
 .st-issue.done { opacity: .62; }
+.st-issue.dismissed { opacity: .55; }
+.st-dismissed {
+  color: var(--text-3) !important;
+  border-color: var(--border) !important;
+  background: rgba(255, 255, 255, .04) !important;
+}
+.btn.st-dismiss, .btn.st-restore {
+  height: 24px; padding: 0 9px;
+  font-size: 10.5px; font-weight: 500;
+  color: var(--text-3);
+}
+.btn.st-dismiss::before { content: "×"; margin-right: 3px; font-size: 11px; }
+.btn.st-restore::before { content: "↺"; margin-right: 3px; font-size: 11px; }
+.btn.st-dismiss:hover, .btn.st-restore:hover { color: var(--text-2); }
 .st-check { flex: none; padding-top: 1px; }
 .st-check label { position: relative; display: block; cursor: pointer; }
 .st-check input { position: absolute; opacity: 0; width: 1px; height: 1px; }
@@ -3126,9 +3242,11 @@ body.notice-on { overflow: hidden; }
 #egress-badge.warn { color: var(--high); border-color: rgba(232, 129, 58, .45); }
 #egress-badge.ok { color: var(--pass); border-color: rgba(79, 191, 122, .4); }
 
-/* 冷启动探测提示 */
+/* 冷启动探测提示。
+   以前顶栏只有 logo 一行，14px 的位置是空的；现在顶栏里装了主导航，
+   14px 正好压住「记录 / 设置」两个页签，所以挪到顶栏下面。 */
 .busy-chip {
-  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+  position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
   z-index: 8500; display: flex; align-items: center; gap: 9px;
   padding: 7px 16px 7px 13px;
   font-size: 12px; letter-spacing: .04em; color: #1b1305; font-weight: 600;
@@ -3177,3 +3295,43 @@ body.notice-on { overflow: hidden; }
 }
 .un-why { font-size: 10.5px; color: var(--text-3); line-height: 1.65; }
 .un-danger { font-size: 10.5px; color: var(--high); line-height: 1.65; }
+
+/* 最近操作 */
+.hist-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.hist-item {
+  display: grid; grid-template-columns: 92px 1fr auto; gap: 10px;
+  align-items: baseline; padding: 7px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  font-size: 11.5px; line-height: 1.5;
+}
+.hist-item.bad { border-color: color-mix(in srgb, var(--high) 40%, transparent); }
+.hist-time { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+.hist-body { min-width: 0; }
+.hist-action { color: var(--text); }
+.hist-detail { color: var(--text-3); font-size: 10.5px; word-break: break-all; }
+.hist-flag { font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
+.hist-flag.ok { color: var(--ok); }
+.hist-flag.bad { color: var(--high); }
+.hist-empty { font-size: 11.5px; color: var(--text-3); padding: 6px 0; }
+
+/* 记录页：守护事件和写盘记录都空着时，两块空卡并成一句话。
+   两个「暂无」各占一张卡，看着像两处都没加载出来。 */
+.records-empty { margin: 0; padding: 64px 0 0; text-align: center; font-size: 12.5px; color: var(--text-3); }
+.records-empty[hidden] { display: none; }
+#panel-records.all-empty #guard-card,
+#panel-records.all-empty #history-card { display: none; }
+
+/* 子页签：主窗口里按页分组，和顶栏主导航分开。 */
+.sub-tabs[hidden] { display: none; }
+.sub-tabs { border-bottom: 0; margin-top: -12px; flex-wrap: wrap; }
+.sub-tabs .tab { font-size: 13px; padding: 10px 14px; }
+.primary-tabs .tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+#guard-events li { overflow-wrap: anywhere; }
+
+/* 维护窗口只在需要时打开，日常守护使用原生哨兵面板。 */
+#proxyfix-dns-card, #proxyfix-card { scroll-margin-top: 86px; }
+
+/* 独立窗口仅保留可选魔塔体验；维护入口统一转交菜单栏面板。 */
+.game-window .primary-tabs [data-tab="privacy"],
+.game-window .primary-tabs [data-tab="settings"],
+.game-window .primary-tabs [data-tab="records"] { display:none; }

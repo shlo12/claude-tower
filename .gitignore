@@ -33,3 +33,12 @@ tools/cache/
 .credentials.json
 shield.json
 egress.json
+
+# Windows native build and isolated .NET policy test outputs
+windows/shield/*.exe
+windows/shield/tests/bin/
+windows/shield/tests/obj/
+WindowsShield.exe
+
+# Private design reviews and first drafts; approved assets live in docs/assets.
+docs/previews/

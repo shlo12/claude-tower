@@ -168,14 +168,14 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(st["app"]["launchAgent"], "none")
 
     def test_shield_is_looked_for_inside_the_tower_bundle(self):
-        """一个下载：不能再去找 /Applications 里的独立 Claude Shield.app。"""
+        """一个下载：不能再去找 /Applications 里的独立 CC Shield.app。"""
         self.assertTrue(shield.APP_PATHS)
         for path in shield.APP_PATHS:
-            self.assertIn("Claude Tower.app/Contents/Resources/Claude Shield.app",
+            self.assertIn("CC Tower.app/Contents/Resources/CC Shield.app",
                           str(path))
         tmp = Path(tempfile.mkdtemp(prefix="ccclean-nested-"))
         try:
-            nested = tmp / "Claude Tower.app/Contents/Resources/Claude Shield.app"
+            nested = tmp / "CC Tower.app/Contents/Resources/CC Shield.app"
             nested.mkdir(parents=True)
             with patch.object(shield, "APP_PATHS", (nested,)):
                 self.assertTrue(shield.installed())

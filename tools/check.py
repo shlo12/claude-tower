@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Tower 冒烟检查：不联网、不改任何文件，几秒跑完。
+"""CC Tower 冒烟检查：不联网、不改任何文件，几秒跑完。
 
 覆盖五类最容易悄悄坏掉的东西：
 
@@ -241,6 +241,21 @@ def check_dom_refs() -> None:
                 dead.append(f"{name}: #{ref}")
     check("事件绑定都指向真实存在的元素", not dead, ", ".join(dead))
 
+    # 后代选择器同样会炸，而且更难发现：`$('#brand .brand-sub')` 在元素被删掉
+    # 之后是 null，对 null 赋 textContent 会抛错，把整个初始化函数停在那一步。
+    # 表现是「页面能打开，但所有按钮都没反应」——看起来像 JS 没加载。
+    # 类名可能来自静态 HTML，也可能是脚本里拼出来的模板，两边都算存在。
+    haystack = html
+    for name in ("app.js", "tower.js", "guard.js"):
+        haystack += (ROOT / "web" / name).read_text(encoding="utf-8")
+    dead = []
+    for name in ("app.js", "tower.js", "guard.js"):
+        src = (ROOT / "web" / name).read_text(encoding="utf-8")
+        for cls in re.findall(r"\$\('#[\w-]+ \.([\w-]+)'\)", src):
+            if not re.search(r'class="[^"]*\b' + re.escape(cls) + r'\b', haystack):
+                dead.append(f"{name}: .{cls}")
+    check("后代选择器指向的类名还在", not dead, ", ".join(dead))
+
 
 def check_deploy_target() -> None:
     """最低系统版本必须是「编译目标」和「Info.plist」两处一致，而且不能随手抬高。
@@ -271,7 +286,7 @@ def check_deploy_target() -> None:
           f"target={target}")
 
     # 已经构建过的话，顺手核对二进制里真正写进去的 minos
-    bin_path = ROOT / "Claude Tower.app" / "Contents" / "MacOS" / "CCclean"
+    bin_path = ROOT / "CC Tower.app" / "Contents" / "MacOS" / "CCclean"
     if not bin_path.exists():
         return
     for arch in ("arm64", "x86_64"):
@@ -295,7 +310,7 @@ def check_bundled_python() -> None:
     在开发机上一切正常（有 homebrew python 兜底），发出去就废。
     """
     print("\n[内置 Python]")
-    app = ROOT / "Claude Tower.app"
+    app = ROOT / "CC Tower.app"
     if not app.exists():
         print("  · 应用还没构建，跳过")
         return
@@ -346,6 +361,9 @@ def check_api_guard() -> None:
 
     for method in ("do_POST", "do_DELETE"):
         body = body_of(method)
+        if method == "do_POST" and "self._post()" in body:
+            check("POST 维修锁在 finally 中释放", "finally:" in body and "os.close(self._maintenance_fd)" in body)
+            body = body_of("_post")
         check(f"{method} 存在", bool(body))
         if not body:
             continue
@@ -607,7 +625,7 @@ def check_shield_baseline() -> None:
     check("基线只写自己那几个键",
           'data["baselineTz"]' in wb and 'data["country"]' in wb
           and 'data["egressIP"]' in wb and 'data["egressAt"]' in wb
-          and '"enabled"' not in wb and '"hits"' not in wb)
+          and 'data["enabled"] =' not in wb and 'data["hits"] =' not in wb)
     check("探测不到出口时保留旧值", "if country and data.get" in shield_py)
     check("探测不到出口 IP 时保留旧值", "if egress and data.get" in shield_py)
     # 出口 IP 是给 Shield 比对 STUN 用的，落盘的必须是打码后的那个字段
@@ -717,6 +735,68 @@ def check_new_findings() -> None:
     # 这两项都依赖外部命令，Windows 上没有对应实现，必须早退而不是报错
     check("Windows 下不读 defaults 语言域", "compat.IS_WIN" in sc.split(
         "def _client_language_state", 1)[-1].split("\ndef ", 1)[0])
+
+    # 多源情报交叉验证：单源探针只会给出「一家之说」，而这个地址的归属
+    # 本来就可能是有争议的。比对必须是纯函数（能单测），判据必须接进出口检查。
+    np_py = (ROOT / "core/netprobe.py").read_text(encoding="utf-8")
+    check("多源比对是纯函数", "def consensus(" in np_py and "def _fetch_all(" in np_py)
+    check("多源并行而非依次降级", "threading.Thread" in np_py)
+    check("多源结果有缓存", "CACHE_TTL" in np_py and "def probe_all(" in np_py)
+    # ipapi.is 免费层是扁平结构，只读嵌套会让国家/城市/时区全变成 None
+    check("ipapi.is 两种返回形状都认", "loc = data" in np_py)
+    check("国名归一成 ISO 码", "def _country_code(" in np_py)
+    check("ASN 写法归一", "def _asn_key(" in np_py)
+    check("交叉验证接进出口检查", "def _check_ip_consensus(" in sc
+          and '"net.ip_consensus"' in sc and '"net.ip_consensus"' in tw)
+    # 只有一家时不下结论：说「一致」是编的，说「不一致」也是
+    check("单源不下结论", 'count < 2' in sc.split(
+        "def _check_ip_consensus", 1)[-1].split("\ndef ", 1)[0])
+
+    # 免管理员的时区/语言对齐：写 shell 启动文件的标记块，必须可撤销，
+    # 且块外已有的 TZ/LANG 不能被覆盖（两块配置谁生效不该由工具决定）
+    se_py = (ROOT / "core/shellenv.py").read_text(encoding="utf-8")
+    check("终端环境可写可撤", "def apply(" in se_py and "def undo(" in se_py)
+    check("终端环境只写标记块", "BLOCK0" in se_py and "def strip_block(" in se_py)
+    check("块外已有变量就拒绝", "foreign_lines" in se_py and "foreign" in se_py)
+    check("终端环境写后回读", "回读不一致" in se_py)
+    check("终端环境不猜时区", "_TZ_BY_COUNTRY" in se_py and "推不出" in se_py)
+    # 目标国家要跟着实际出口走，不能只看「预期国家」那个配置：这一层修的
+    # 就是「时区和出口对不上」，写一个跟出口无关的值等于把不一致换个理由
+    # 目标国家：预期国家优先于实际出口。出口是「此刻」，预期是「长期」——
+    # 代理关掉的那几分钟里按出口写，会把用户想摆脱的状态原样写回去
+    check("终端环境目标不跟着瞬时出口跑",
+          '(wanted, "expected") if wanted else (' in se_py
+          and '_egress_country(), "egress")' in se_py)
+    # 平台闸门要写在入口。靠 shellproxy.rc_path() 返回空来挡是巧合：
+    # 换个平台上恰好有 zsh 它就认得了，会去写一个本工具不支持的 rc
+    check("终端环境有平台闸门", "_require_mac()" in se_py
+          and se_py.count("_require_mac()") >= 3
+          and "compat.IS_MAC" in se_py)
+
+    # 扫描要跳过本工具自己写的标记块：不然 shellenv 刚写进去的 export TZ
+    # 会被当成用户残留，再给一条「注释掉」的建议，等于拆自己刚搭的东西
+    check("扫描跳过自己写的标记块",
+          "_managed_spans" in sc and "_MANAGED_RE" in sc
+          and "a <= idx < b" in sc)
+
+    # 改完系统设置要重算分数：不重扫，界面会一直显示修之前的结论，
+    # 用户会以为没修上，然后去修一个已经修好的问题
+    app_js = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    check("改完设置会重算分数", "function rescanAfterFix(" in app_js
+          and app_js.count("rescanAfterFix();") >= 6)
+    check("生成启动器不算改设置",
+          "if (action !== 'wrapper') rescanAfterFix();" in app_js)
+
+    # 操作日志是旁路：写失败不能把修复带崩
+    hist_py = (ROOT / "core/history.py").read_text(encoding="utf-8")
+    check("操作日志是旁路", "except Exception" in hist_py and "return False" in hist_py)
+    check("操作日志 0600", "0o600" in hist_py)
+    check("操作日志追加式", '"a", encoding="utf-8"' in hist_py and "def _rotate(" in hist_py)
+    check("写入动作都挂日志", all(
+        f'history.log("{a}"' in (ROOT / "core" / f).read_text(encoding="utf-8")
+        for a, f in (("align.apply", "align.py"), ("region.apply", "regioncfg.py"),
+                     ("privacy.apply", "privacy.py"),
+                     ("shellenv.apply", "shellenv.py"))))
 
 
 def check_transport_logic() -> None:
@@ -926,7 +1006,12 @@ def check_uninstaller() -> None:
 
     from core import uninstall as U
 
-    check("清单顺序固定", U._ORDER[:3] == ["proxyfix", "proxydns", "privacy"])
+    check("清单顺序固定",
+          U._ORDER[:6] == ["proxyfix", "proxydns", "sessionapi", "shellproxy", "shellenv", "privacy"])
+    # 写进 shell 启动文件的那几行必须能撤，否则卸载后终端时区还被它管着
+    check("终端环境变量在卸载清单里",
+          "shellenv" in U._ORDER and 'item_id == "shellenv"' in (
+              ROOT / "core/uninstall.py").read_text(encoding="utf-8"))
     check("自己排最后", U._ORDER[-1] == "tower_app")
     check("先停进程再删文件",
           U._ORDER.index("stop") < U._ORDER.index("state")
@@ -943,7 +1028,7 @@ def check_uninstaller() -> None:
     check("文案不再声称不动 ~/.claude", "不会动你的 Claude Code 本身" not in un)
     check("看门狗先于哨兵",
           un.index('_stop([WATCHDOG_NAME], _is_watchdog)')
-          < un.index('_stop(["Claude Shield.app'))
+          < un.index('_stop(["CC Shield.app'))
     check("LaunchAgent 先 bootout 再移走", "bootout" in un)
     check("确认串是打字确认", U.CONFIRM_WORD == "UNINSTALL" and "UNINSTALL" in un)
 
@@ -954,7 +1039,7 @@ def check_uninstaller() -> None:
     check("页面有卸载卡片", 'id="uninstall-card"' in html)
     check("确认前按钮禁用", "uninstall-go" in html and "disabled" in html.split('id="uninstall-go"')[1][:40])
     check("清单渲染带复选框", "data-un=" in js and "uninstallPlan" in js)
-    check("切换隐私页时读取清单", "loadUninstall()" in js.split("function switchTab", 1)[-1][:600])
+    check("设置页读取卸载清单", "if (name === 'settings') { refreshUpdate(); loadUninstall();" in js)
 
     # 这条是给未来的自己看的：曾经因为只在「执行类」测试里打桩，
     # 另一个类的 execute() 拿着真实路径跑了一次，把开发机的 ~/.ccclean
@@ -1018,7 +1103,7 @@ rules:
     check("最终规则落到 DIRECT 报高危",
           deep.check_proxy_fallback(guard(fallback.replace(
               "MATCH,Fallback", "MATCH,DIRECT")))["severity"] == "high")
-    check("select 默认成员 DIRECT 报高危",
+    check("select 成员顺序不冒充实际选择",
           deep.check_proxy_fallback(guard("""
 proxy-groups:
   - name: Pick
@@ -1028,7 +1113,7 @@ proxy-groups:
       - HK
 rules:
   - MATCH,Pick
-"""))["severity"] == "high")
+"""))["severity"] != "high")
     check("自动组没有 DIRECT 判通过",
           deep.check_proxy_fallback(guard("""
 proxy-groups:
@@ -1062,6 +1147,40 @@ rules:
     check("自动换节点项有产出", '"net.proxy_drift"' in dp)
     check("出口未确认不发终端请求",
           deep.check_terminal_egress({"available": False})["severity"] == "info")
+
+    # 终端环境：登录 shell 里 Claude 会继承到的时区/语言。
+    # 这是「免管理员对齐」唯一的验收方式——塔读自己的进程 env、哨兵读
+    # /etc/localtime，两边都绕开了终端，不测就没人知道它到底生没生效。
+    te_py = (ROOT / "core" / "terminalegress.py").read_text(encoding="utf-8")
+    check("登录 shell 一并读时区语言",
+          "_LOCALE_KEYS" in te_py and "def parse_env(" in te_py
+          and "@\\\\1=" in te_py)
+    check("环境变量只取白名单", "if sep and key in _LOCALE_KEYS" in te_py)
+    check("终端环境项有产出并被关卡消费",
+          '"locale.shell_env"' in dp and '"locale.shell_env"' in tw)
+    check("登录 shell 一次扫描只跑一次",
+          "term = _terminal_probe(net_info)" in dp
+          and "fn(net_info, term)" in dp
+          and dp.count("_terminal_probe(") == 4)
+
+    # 哨兵的实时结论：塔只在自己被按下时看世界，两次之间靠这一份接上
+    sc = (ROOT / "core" / "scanner.py").read_text(encoding="utf-8")
+    tw = (ROOT / "core" / "tower.py").read_text(encoding="utf-8")
+    sh_py = (ROOT / "core" / "shield.py").read_text(encoding="utf-8")
+    sw_store = (ROOT / "shield" / "Store.swift").read_text(encoding="utf-8")
+    sw_app = (ROOT / "shield" / "ShieldApp.swift").read_text(encoding="utf-8")
+    check("哨兵把实时结论写进共享文件",
+          "var live: Live?" in sw_store and "func publishLive(" in sw_app)
+    check("实时结论打码后才落盘",
+          "stunExposed: snap.stunExposed.map(maskAddress)" in sw_app)
+    check("塔读得到哨兵的实时结论", "def live() -> dict:" in sh_py and "LIVE_TTL" in sh_py)
+    check("过期的实时结论不当现状", '"fresh": age <= LIVE_TTL' in sh_py)
+    check("实时结论字段做类型清洗", "def _strs(" in sh_py and "def _int(" in sh_py)
+    check("实时结论接入扫描", '"shield.live"' in sc and "_check_shield_live" in sc)
+    check("实时结论并进代理关", '"shield.live"' in tw)
+    # 泄漏取并集：哨兵十秒看一次，比单次快照更容易撞上分裂
+    check("WebRTC 合并哨兵证据", "shield.live() if live is None else live" in sc
+          and "s_exposed" in sc)
 
     from core import proxydns  # noqa: F401  仅确认模块可导入
     rep = {
@@ -1233,8 +1352,282 @@ def check_kernelcheck() -> None:
     check("MATCH 之后的规则算没写", out["state"] == "mismatch", out.get("reason", ""))
 
 
+def check_tower_wiring() -> None:
+    """关卡与扫描结果之间那条线。这里坏掉不会报错，只会「什么都通过」。"""
+    from core import uatraits
+
+    # 1. 工具引擎的端口区间：Python 挑一个、Swift 认一个，两边必须一样。
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    m = re.search(r"def _free_port\(start: int = (\d+)\).*?range\(start, start \+ (\d+)\)",
+                  app, re.S)
+    check("找得到 _free_port 的端口区间", bool(m))
+    swift = (ROOT / "shield/ShieldApp.swift").read_text(encoding="utf-8")
+    m2 = re.search(r"\((\d+)\.\.\.(\d+)\)\.contains\(port\)", swift)
+    check("找得到哨兵的端口白名单", bool(m2))
+    if m and m2:
+        lo, count = int(m.group(1)), int(m.group(2))
+        check("工具引擎端口区间与哨兵一致",
+              (lo, lo + count - 1) == (int(m2.group(1)), int(m2.group(2))),
+              f"python {lo}..{lo + count - 1} vs swift {m2.group(1)}..{m2.group(2)}")
+
+    # 2. 带后缀的条目要能按前缀取到。这一条坏掉，high 级的凭据泄露会显示成
+    #    「未发现凭据残留」——不报错，只是永远绿。
+    idx = {
+        "cred.shell_keys.zshrc": {"id": "cred.shell_keys.zshrc", "severity": "high",
+                                  "fix": {"kind": "shellrc"}},
+        "cred.settings.settings_json": {"id": "cred.settings.settings_json",
+                                        "severity": "critical", "fix": {"kind": "json_keys"}},
+    }
+    got = tower._worst(idx, ["cred.shell_keys.*", "cred.settings.*"])
+    check("塔能按前缀取到带后缀的条目", bool(got) and got["id"] == "cred.settings.settings_json")
+    check("一键修复用的是真实条目 id",
+          tower._fixable_ids(idx, ["cred.shell_keys.*"]) == ["cred.shell_keys.zshrc"])
+    check("前缀匹配只认整段前缀",
+          tower._matches({"a.b": {}}, "a.*") == [{}] and tower._matches({"ab": {}}, "a.*") == [])
+
+    # 3. 每个带后缀的家族都必须被某一关读到。这条是通用形式：
+    #    产出 `B.<后缀>` 的家族，关卡里必须出现 `B.*`、`B.xxx` 或 startswith("B")。
+    families: set[str] = set()
+    for name in ("core/scanner.py", "core/deep.py"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        for prefix in re.findall(r'_item\(\s*f"([^"{]+)\{', text):
+            families.add(prefix.rstrip("."))
+    tw = (ROOT / "core/tower.py").read_text(encoding="utf-8")
+    refs = set(re.findall(r'"([a-z][a-z0-9_]*\.[a-z0-9_.*]*)"', tw))
+    prefixes = set(re.findall(r'startswith\(\s*"([a-z][a-z0-9_.]*)"', tw))
+
+    def covered(base: str) -> bool:
+        return (any(r == base or r == base + ".*" or r.startswith(base + ".") for r in refs)
+                or any(base == p or base.startswith(p + ".") for p in prefixes))
+
+    # err.* 是检查本身崩了的提示项，按设计不进关卡。
+    orphans = sorted(b for b in families if not b.startswith("err") and not covered(b))
+    check("带后缀的条目都有关卡消费", not orphans, "、".join(orphans))
+    # 反过来：关卡里裸写家族名永远匹配不上，正是 cred.shell_keys 出过的错。
+    # 例外是 `startswith("net.proxy_env")` 这种显式按前缀筛的写法，那是对的。
+    bare = sorted(b for b in families if b in refs and b not in prefixes)
+    check("关卡没有裸写家族名", not bare, "、".join(bare))
+
+    # 4. 自动换节点的组要进代理关——它扫得出来但没人看，等于白扫。
+    check("自动换节点的组进代理关", "net.proxy_drift" in tower._PROXY_EXTRAS)
+
+    # 5. 引擎端口文件只给自己读，且是原子替换（哨兵每 0.25 秒读一次）。
+    fn = re.search(r"def _write_runtime.*?(?=\ndef |\nclass |\Z)", app, re.S)
+    body = fn.group(0) if fn else ""
+    check("runtime.json 只给自己读", "0o600" in body and "0o700" in body)
+    check("runtime.json 原子替换", "os.replace" in body)
+
+    # 6. 接口被外部改回时要能收场，不能永久卡在「可恢复」。
+    sa = (ROOT / "core/sessionapi.py").read_text(encoding="utf-8")
+    check("接口被改回时清记录而不是报错", sa.count("_DISCARDED") >= 2)
+
+    # 7. 过期不等于违规：过期只结束会话，违规才走到杀进程。
+    probe = (ROOT / "shield/Probe.swift").read_text(encoding="utf-8")
+    check("过期与违规分开判", "static func staleIssue" in probe and "static func contentIssue" in probe)
+    running = re.search(r"static func runningIssue.*?\n    \}", probe, re.S)
+    body = running.group(0) if running else ""
+    check("值守中不再把过期当违规",
+          "contentIssue(s)" in body and "admissionIssue(s)" not in body)
+    shield = (ROOT / "shield/ShieldApp.swift").read_text(encoding="utf-8")
+    check("过期只结束会话不杀进程", "StrictSessionPolicy.staleIssue(snap)" in shield)
+
+    # 8. 国产机型码：OPPO 三代写法都要认，且不能把华硕 VivoBook 当手机。
+    check("OPPO 旧机型码识别", uatraits.classify_device("Android 12; PDEM10")[0] == "OPPO")
+    check("OPPO 新机型码识别", uatraits.classify_device("Android 13; PFZM10")[0] == "OPPO")
+    check("OPPO 三位数字机型码识别", uatraits.classify_device("Android 14; PHK110")[0] == "OPPO")
+    check("笔记本不当国产手机",
+          uatraits.classify_device("Windows NT 10.0; Win64; x64) ASUS VivoBook")[0] == "")
+    check("三星机型码不误判",
+          uatraits.classify_device("Android 13; SM-G991B")[0] == "")
+
+
+def check_tower_chrome() -> None:
+    """塔的外壳：一层导航、没有重复标题、和哨兵共用一条结论。
+
+    「太臃肿」不是感觉，是版面被三样东西吃掉：logo 一行、主导航一行、二级
+    导航一行（208px），每页开头再写一遍「大标题 + 副标题」（90px），而这一屏
+    真正要看的塔只剩不到 800px。这里盯住那三样别再长回来。
+    """
+    print("\n[塔的外壳]")
+    html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
+
+    topbar = html.split("<header class=\"topbar\">", 1)[1].split("</header>", 1)[0]
+    check("主导航在顶栏里", "primary-tabs" in topbar)
+    check("内容区不再有第二条主导航", 'class="tabs primary-tabs"' not in html.split("</header>", 1)[1])
+    check("顶栏里有哨兵结论灯", 'id="top-verdict"' in topbar)
+    guard = (ROOT / "web" / "guard.js").read_text(encoding="utf-8")
+    check("结论灯由守护状态驱动", "top-verdict" in guard and "renderVerdict" in guard)
+
+    # 二级页签降级成「贴着内容的下划线」，不再是一条和主导航长得一样的横栏。
+    block = css.split(".sub-tabs {", 1)[1].split("}", 1)[0]
+    check("二级页签不再是独立横栏", "background: none" in block and "border-bottom" in block)
+
+    # 合并后「结算 / 详情」共用一个面板，页首大标题一并清掉。
+    # 注释里可以提到 panel-head（那是在解释为什么删掉它），只看真实标签。
+    bare = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    for pid in ("panel-results", "panel-checklist"):
+        seg = bare.split(f'id="{pid}"', 1)[1].split("</section>", 1)[0]
+        check(f"{pid} 没有重复大标题", "panel-head" not in seg)
+
+    # 主界面是一扇独立窗口，它没有「返回上一层」：那个按钮是「面板长大」
+    # 方案留下的，只有面板被拉宽时才需要退回去。
+    check("顶栏不再有返回按钮", 'id="btn-back"' not in html)
+    app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+    check("页面不再靠面板通道判断自己嵌在哪", "in-panel" not in app)
+
+
+def check_panel_shell() -> None:
+    """哨兵的外壳：一个自己控制的 borderless 面板，不是 NSPopover。
+
+    popover 只能有一种尺寸和一种关闭策略，圆角、阴影、Esc 全交给系统，
+    连「点别处收起」都要靠 `.transient` 那条固定行为。换成自己的 NSPanel
+    之后这些都归自己管，代价是每一条都得自己写对。这里盯住那几条，
+    免得哪天又悄悄退回 popover。
+    """
+    swift = (ROOT / "shield/ShieldApp.swift").read_text(encoding="utf-8")
+    # 注释里可以提到 popover（那是在解释为什么不用它），代码里不行。
+    body = re.sub(r"^\s*///.*$|^\s*//.*$", "", swift, flags=re.M)
+    check("面板不是 NSPopover", "NSPopover" not in body)
+    check("有独立的 ShieldPanel 类", "final class ShieldPanel: NSPanel" in swift)
+    check("面板能成为 key（否则键盘全丢）",
+          re.search(r"override var canBecomeKey: Bool \{ true \}", swift) is not None)
+    check("面板无边框且透明底", ".borderless" in swift and "isOpaque = false" in swift)
+    check("面板有圆角容器", "cornerRadius" in swift and "masksToBounds = true" in swift)
+    # 非激活面板从不把应用激活，所以「一 makeKey 就失焦」——按失焦收起会变成
+    # 点一下闪一下就没了。必须用全局鼠标监听判断「点到了别处」。
+    check("用全局鼠标监听判断点外面", "addGlobalMonitorForEvents" in swift)
+    check("不用失焦收起（非激活面板会闪退）", "windowDidResignKey" not in body)
+    check("监听器收起时摘掉", "removeOutsideClickMonitor" in swift)
+    check("点图标关面板不会被重新打开", "panelAutoClosedAt" in swift)
+
+    # 宽度只有一个来源。散落的 340 会在改成宽态那天变成一堆对不上的数。
+    strays = re.findall(r"\b340\b", body)
+    check("窄态宽度只有一处定义", len(strays) <= 1, f"出现 {len(strays)} 次")
+    # 高度同理。772 以前在三个地方各写一遍，改一处另外两处就悄悄错开。
+    strays = re.findall(r"\b772\b", body)
+    check("窄态高度只有一处定义", len(strays) <= 1, f"出现 {len(strays)} 次")
+
+    # 落点算法是纯函数，必须有独立文件并进构建列表，否则测不到。
+    check("落点算法独立成文件", (ROOT / "shield/PanelGeometry.swift").exists())
+    build = (ROOT / "tools/build-shield.sh").read_text(encoding="utf-8")
+    check("落点文件进了构建列表", "PanelGeometry.swift" in build)
+
+    # 1440×900 的笔记本上 Dock 一大，可用高度只剩 750 上下，772 点放不下。
+    # 光靠 origin 只能把面板贴到底边，底栏照样掉在屏幕外，所以必须先收尺寸。
+    geom = (ROOT / "shield/PanelGeometry.swift").read_text(encoding="utf-8")
+    check("面板尺寸会先收进屏幕", "func fitting(" in geom)
+    check("定位前先收尺寸", "PanelGeometry.fitting(" in body)
+
+
+def check_main_window() -> None:
+    """主界面必须是**一扇独立的窗口**，不是被拉宽的菜单栏面板。
+
+    用户的原话是「你这不还是展开一个大面板吗」。面板是菜单栏的附属物：
+    无标题栏、失焦即收、不能缩放。把它拉宽到 760 之后这些性质一条没变，
+    所以手感还是「一个很长的下拉菜单」，而不是「一个程序的主界面」。
+
+    这里盯住三条：
+    - 主界面走 NSWindow（有标题栏、能缩放、能最小化），不走 ShieldPanel；
+    - 同一个程序里只有一个主窗口，重复打开是换页不是再开一扇；
+    - 关掉窗口哨兵还在（不 terminate、不退出应用）。
+    """
+    swift = (ROOT / "shield/ShieldApp.swift").read_text(encoding="utf-8")
+    body = re.sub(r"^\s*///.*$|^\s*//.*$", "", swift, flags=re.M)
+
+    m = re.search(r"func openMainWindow\(", body)
+    if not check("有主窗口入口", m is not None):
+        return
+    # 只取 openMainWindow 本体：到下一个方法为止。
+    seg = body[m.start():].split("\n    func ", 1)[0]
+    check("主界面是独立窗口", "NSWindow(" in seg)
+    check("主界面不是拉宽的面板", "ShieldPanel(" not in seg and "resizePanel(" not in seg)
+    check("窗口有标题栏和关闭按钮", ".titled" in seg and ".closable" in seg)
+    check("窗口能缩放、能最小化", ".resizable" in seg and ".miniaturizable" in seg)
+    check("重复打开是换页不是再开一扇", "if let win = mainWindow" in seg)
+    check("主界面不打开别的应用", "openApplication" not in seg and "openTower(" not in seg)
+
+    # 面板只有一种尺寸。以前这里有一个 resizePanel，宽态靠它把同一个面板
+    # 拉到 760——那条路正是「大面板」的来源，必须彻底断掉。
+    check("面板不再能被改成别的尺寸", "func resizePanel(" not in body)
+
+    # 关窗不等于退出：哨兵要留在菜单栏。窗口自己收引用，引擎跟着收。
+    willclose = body.split("func windowWillClose(", 1)
+    check("关窗只清引用不退出应用",
+          len(willclose) == 2 and "terminate" not in willclose[1].split("\n    func ", 1)[0])
+    check("关掉最后一扇窗不退出",
+          re.search(r"applicationShouldTerminateAfterLastWindowClosed[^{]*\{\s*false",
+                    body) is not None)
+
+    # 两扇窗各有自己的 webView：共用一份会在关掉一扇时让另一扇白屏。
+    check("主窗口有独立的 webView", "var mainWebView: WKWebView?" in swift)
+
+    # 只剩一套状态：老的「工具窗口」和「面板长大」两套状态都得清干净，
+    # 否则两套状态会打架（一个说宽、一个说窄，窗口尺寸就会来回跳）。
+    for dead in ("showingTools", "toolHost", "ownsToolHost", "toolTimer",
+                 "toolOrigin", "toolTicks", "showTools", "pollTools",
+                 "toolsUnavailable", "closeTools", "wideMode", "wideView"):
+        check(f"旧窗口状态已删除：{dead}", dead not in body)
+
+    # 尺寸由外壳决定，不由页面决定。页面能改窗口尺寸，等于把「谁说了算」
+    # 交回给内容——那正是「什么都往哨兵里塞」的起点。
+    check("页面不能改窗口尺寸", 'case "tool-size"' not in body)
+    # 页面那一侧也不能再上报尺寸：外壳不再听，上报就只是每帧一次无用 IPC。
+    panel_js = (ROOT / "web/panel.js").read_text(encoding="utf-8")
+    check("维护页不再上报尺寸", "tool-size" not in panel_js)
+
+    # 入口接线：点「打开主界面」开窗；页面里的「返回」回体检页，不关窗
+    # （窗口自己有标题栏和关闭按钮）。
+    check("打开主界面开主窗口",
+          re.search(r'case "opentower":\s*\n\s*openMainWindow\(', body) is not None)
+    check("页面返回回体检页",
+          re.search(r'case "back-panel":\s*\n\s*if source == \.main', body) is not None)
+
+    # 真窗口就得有真窗口的快捷键：没有主菜单，⌘W / ⌘Q 一律无效，
+    # 用户第一次想关窗就会发现按了没反应。
+    check("有主菜单（⌘W 才有用）", "NSApp.mainMenu" in body)
+
+    # 超时按时间算。以前数 tick（100 × 0.25 秒），定时器被 RunLoop 拖慢就数不准。
+    check("引擎超时按截止时刻算", "engineDeadline" in body)
+    check("引擎状态是显式枚举", "enum EngineState" in swift)
+
+
+def check_panel_scroll() -> None:
+    """面板变矮时，顶栏和底栏必须还在，滚的只能是中间。
+
+    场景是 1440×900 的笔记本 + 大 Dock：可用高度只剩七百出头，772 点放不下，
+    `PanelGeometry.fitting` 会把面板收矮。如果这时整页跟着滚，底栏（瞭望/戒严、
+    退出）就被推到屏幕外——用户看着面板却点不到最要紧的两个按钮。
+    纯结构断言，真正的高度关系由 `test_panel_geometry.py` 算。
+    """
+    html = (ROOT / "shield/web/shield.html").read_text(encoding="utf-8")
+    css = (ROOT / "shield/web/shield.css").read_text(encoding="utf-8")
+
+    check("中间内容有独立滚动区", '<div class="scroll">' in html)
+    head = html.split("<header>", 1)[0]
+    check("顶栏在滚动区之外", '<div class="scroll">' not in head)
+    body_after = html.split("</header>", 1)[1]
+    check("滚动区从头栏之后开始", body_after.index('<div class="scroll">')
+          < body_after.index("<footer>"), "滚动区必须包住 footer 之前的内容")
+    # footer 必须落在滚动区闭合之后：先找 /.scroll 标记，再看 footer 的位置。
+    if "<!-- /.scroll -->" in html:
+        tail = html.split("<!-- /.scroll -->", 1)[1]
+        check("底栏在滚动区之外", "<footer>" in tail)
+    else:
+        check("滚动区有闭合标记", False, "缺 <!-- /.scroll --> 注释")
+
+    block = css.split(".scroll {", 1)[1].split("}", 1)[0] if ".scroll {" in css else ""
+    check("滚动区可纵向滚动", "overflow-y: auto" in block)
+    check("滚动区能压缩（min-height: 0）", "min-height: 0" in block,
+          "不写这条，flex 子项会被内容撑开，滚不动")
+    wrap = css.split(".wrap {", 1)[1].split("}", 1)[0]
+    check("外壳固定一屏高", "height: 100vh" in wrap)
+    # height:auto + min-height:100vh 会把底栏推下去，正是要防的那种写法。
+    check("外壳没有被改成随内容长高", "height: auto" not in wrap)
+
+
 def main() -> int:
-    print("Claude Tower · 冒烟检查")
+    print("CC Tower · 冒烟检查")
     check_maps()
     check_levels()
     check_drift()
@@ -1253,6 +1646,11 @@ def main() -> int:
     check_browser_side()
     check_kernelcheck()
     check_uninstaller()
+    check_tower_wiring()
+    check_panel_shell()
+    check_main_window()
+    check_tower_chrome()
+    check_panel_scroll()
     check_deploy_target()
     check_bundled_python()
     check_dom_refs()

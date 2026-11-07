@@ -39,8 +39,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import (compat, kernelcheck, proxydns, proxyguard, resolveregress, stun,
-               telemetry, terminalegress)
+from . import (compat, kernelcheck, proxydns, proxyguard, resolveregress, shellenv,
+               stun, telemetry, terminalegress, vmnetwork)
 
 HOME = Path.home()
 CLAUDE_DIR = HOME / ".claude"
@@ -548,7 +548,7 @@ def check_browser() -> dict:
              "浏览器配置目录读不到，这项检测没跑完。")
             + "注意：这不等于「浏览器里是干净的」，只是没读到。",
             ev,
-            ("在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」里给 Claude Tower 授权后重新闯关。"
+            ("在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」里给 CC Tower 授权后重新闯关。"
              if compat.IS_MAC else "确认目录权限后重新闯关。"),
         )
     return _item("res.browser", "residue", "浏览器里未发现 Claude 集成", "pass",
@@ -955,7 +955,7 @@ def _scan_rule_configs() -> tuple[list[str], list[dict]]:
     scanned: list[str] = []
     entries: list[dict] = []
     seen: set[tuple[str, str, str, str]] = set()
-    for root in _CLASH_ROOTS:
+    for root in (*_CLASH_ROOTS, *((Path('/usr/local/etc/mihomo'),) if vmnetwork.enabled() else ())):
         if not root.exists():
             continue
         for y in _config_files(root):
@@ -1190,7 +1190,7 @@ def check_pinned(online: bool = True) -> dict:
 
 def _tun_enabled_in_configs() -> bool:
     """当前生效的代理配置里有没有启用 TUN。只读，不探测网络。"""
-    for root in _CLASH_ROOTS:
+    for root in (*_CLASH_ROOTS, *((Path('/usr/local/etc/mihomo'),) if vmnetwork.enabled() else ())):
         if not root.exists():
             continue
         try:
@@ -1799,7 +1799,24 @@ def check_proxy_drift(guard: dict | None = None) -> dict:
                  detail, ev, advice)
 
 
-def check_terminal_egress(net_info: dict | None = None) -> dict:
+def _terminal_probe(net_info: dict | None) -> dict:
+    """跑一次登录 shell，拿出口和它继承到的环境。
+
+    出口没确认就不跑：没有基线时发请求等于自己制造一次泄漏。
+
+    返回 `{"ran": bool, "result": {...}}`，让调用方能区分「没跑」和「跑了
+    但失败」——这两件事的处置完全不同。
+    """
+    info = net_info or {}
+    if not info.get("available") or not info.get("ip"):
+        return {"ran": False}
+    return {"ran": True,
+            "result": terminalegress.probe(info.get("ip") or "",
+                                           info.get("ip_masked") or "")}
+
+
+def check_terminal_egress(net_info: dict | None = None,
+                          probe_result: dict | None = None) -> dict:
     """终端里实际发请求的出口，和本次探测是不是同一个。
 
     Claude Code 在终端里跑，继承的是登录 shell 的代理变量。curl 不读 macOS
@@ -1807,13 +1824,14 @@ def check_terminal_egress(net_info: dict | None = None) -> dict:
     只在出口确认后发请求——没有出口时跑一次，等于自己制造一次泄漏。
     """
     info = net_info or {}
-    if not info.get("available") or not info.get("ip"):
+    probe = probe_result if probe_result is not None else _terminal_probe(info)
+    if not probe.get("ran"):
         return _item(
             "net.terminal_egress", "network", "终端出口未检测", "info",
             "出口地址还没确认，没有在登录 shell 里发请求。", [],
             "出口确认后再扫一次。",
         )
-    r = terminalegress.probe(info.get("ip") or "", info.get("ip_masked") or "")
+    r = probe.get("result") or {}
     ev = [_ev("登录 shell", r.get("shell") or "zsh", mono=True)]
     if r.get("ipMasked"):
         where = " · ".join(x for x in (r.get("loc"), r.get("colo")) if x)
@@ -1857,6 +1875,146 @@ def check_terminal_egress(net_info: dict | None = None) -> dict:
     )
 
 
+def _lang_key(value: str) -> str:
+    """`en_US.UTF-8` / `en_US.utf8` / `en_US` 是同一个语言。"""
+    text = (value or "").strip().split(".")[0]
+    return text.replace("-", "_").lower()
+
+
+def _lang_class(value: str) -> str:
+    """把 locale 分成三类：中性 / 中文 / 其它。
+
+    `C` 和 `POSIX` 是「没有区域」，不是「某个国家的区域」。把它们当成
+    「与目标不符」会天天误报——容器、CI、部分终端默认就是这个值，
+    它不泄露任何中文特征，也不该被推着去改。
+    """
+    key = _lang_key(value)
+    if not key or key in ("c", "posix"):
+        return "neutral"
+    return "zh" if key.startswith("zh") else "other"
+
+
+def check_shell_env(net_info: dict | None = None,
+                    probe_result: dict | None = None) -> dict:
+    """登录 shell 里 Claude 会继承到的时区与语言。
+
+    塔自己的进程环境和终端是两回事：从 Finder 启动的塔读不到终端里的环境
+    变量。所以「系统时区对不对」和「终端里的 Claude 看到什么时区」是两个
+    问题——后者只有真起一个登录 shell 才问得到。这趟 shell 为了测出口本来
+    就要跑，环境变量顺手就拿到了，不额外花时间。
+
+    这一项同时是「免管理员对齐」（`shellenv`）唯一的验收方式：它写进 rc 的
+    东西到底生没生效，别的地方都看不出来——塔读的是自己的进程 env，
+    哨兵读的是 `/etc/localtime`，两边都绕开了终端。
+
+    只在出口确认后跑（和终端出口共用一次探测），所以这里也不自己发请求。
+    """
+    info = net_info or {}
+    probe = probe_result if probe_result is not None else _terminal_probe(info)
+    if not probe.get("ran"):
+        return _item(
+            "locale.shell_env", "locale", "终端环境未检测", "info",
+            "出口地址还没确认，没有起登录 shell。", [],
+            "出口确认后再扫一次。",
+        )
+    r = probe.get("result") or {}
+    env = r.get("env") or {}
+    if not env:
+        why = r.get("error") or ""
+        return _item(
+            "locale.shell_env", "locale", "终端环境没读到", "info",
+            "没能从登录 shell 里拿到 TZ / LANG。"
+            + (f"（{why}）" if why else
+               "可能启动文件里有提前 return，或者 shell 在打印环境之前就退出了。"),
+            [_ev("登录 shell", r.get("shell") or "zsh", mono=True)],
+            "在该终端里执行 env | grep -E '^(TZ|LANG|LC_ALL)=' 看看有没有值。",
+        )
+
+    tgt = shellenv.target()
+    shell_tz = str(env.get("TZ") or "").strip()
+    sys_tz = compat.timezone_name() or ""
+    lc_all = str(env.get("LC_ALL") or "").strip()
+    lang = str(env.get("LANG") or "").strip()
+    # POSIX：LC_ALL 压过 LANG。只看 LANG 会在「LC_ALL=zh_CN」时判错。
+    effective_lang = lc_all or lang
+    chain = str(env.get("LANGUAGE") or "").strip()
+
+    ev = [
+        _ev("登录 shell", r.get("shell") or "zsh", mono=True),
+        _ev("TZ", shell_tz or f"（未设置，跟随系统 {sys_tz or '未知'}）", mono=True),
+        _ev("LANG / LC_ALL", f"{lang or '-'} / {lc_all or '-'}", mono=True),
+        _ev("目标", (f"{tgt['timezone']} · {tgt['lang']}" if tgt["resolved"]
+                     else "推不出目标值"), mono=True),
+    ]
+    if chain:
+        ev.append(_ev("LANGUAGE", chain, mono=True))
+
+    if not tgt["resolved"]:
+        return _item(
+            "locale.shell_env", "locale", "终端环境没有目标值", "info",
+            "推不出这台机器该用哪个时区/语言（既没设预期出口国家，也探不到出口）。"
+            "这一项不比较——没有目标就没有对错。",
+            ev,
+            "在「网络」里设定预期出口国家，或手动指定时区后再扫一次。",
+        )
+
+    tgt_lang_key = _lang_key(tgt["lang"])
+    # 只判 shell **自己导出**的值。TZ 没设就是跟随系统，那种不一致是
+    # `net.tz_mismatch` / `locale.tz_env` 的地盘——同一件事在这里再报一次，
+    # 等于一个毛病扣两遍分，用户会觉得「怎么改都掉血」。
+    tz_bad = bool(shell_tz and tgt["timezone"] and shell_tz != tgt["timezone"])
+    lang_class = _lang_class(effective_lang)
+    # 中性（C / POSIX / 未设置）不泄露任何地域特征，不算问题。
+    lang_bad = lang_class == "zh" and not tgt_lang_key.startswith("zh")
+    # 其它语言和目标不一致算轻微：不像中文那样是强信号，但环境确实不统一。
+    lang_off = (lang_class == "other" and bool(tgt_lang_key)
+                and _lang_key(effective_lang) != tgt_lang_key)
+    # LANGUAGE 是 gettext 的优先级链，压过 LANG。只改 LANG 不动它，
+    # 界面语言照样是中文——这是「明明改了却没生效」最常见的原因。
+    chain_bad = bool(chain) and "zh" in chain.lower() and not tgt_lang_key.startswith("zh")
+
+    if not (tz_bad or lang_bad or lang_off or chain_bad):
+        return _item(
+            "locale.shell_env", "locale",
+            "终端环境与出口一致", "pass",
+            "登录 shell 没有额外导出与目标冲突的时区/语言；"
+            "从该终端启动的 Claude Code 继承的就是这一份环境。",
+            ev,
+        )
+
+    parts = []
+    if tz_bad:
+        parts.append(f"TZ 导出成了 {shell_tz}（应为 {tgt['timezone']}）")
+    if lang_bad:
+        parts.append(f"语言是 {effective_lang}（应为 {tgt['lang']}）")
+    if lang_off:
+        parts.append(f"语言是 {effective_lang}，和目标 {tgt['lang']} 不一致")
+    if chain_bad:
+        parts.append(f"LANGUAGE 链里还有中文（{chain}），它会压过 LANG")
+    return _item(
+        "locale.shell_env", "locale",
+        "终端环境与出口对不上", "medium" if (tz_bad or lang_bad or chain_bad) else "low",
+        "登录 shell 里" + "；".join(parts) + "。"
+        "Claude Code 是 Node 进程，读的就是这些环境变量——系统设置改得再对，"
+        "从终端起来的 CLI 拿到的仍是这一份。"
+        "「系统时区」和「终端时区」是两件事，很多人只改了前者。",
+        ev,
+        "用「隐私设置 → 终端时区/语言」写入标记块（免管理员，可随时撤销），"
+        "或者手动在启动文件里 export TZ / LANG / LC_ALL；改完开一个新终端，"
+        "在那里执行 env | grep -E '^(TZ|LANG|LC_ALL)=' 确认。",
+    )
+
+
+def check_vm_network():
+    vm = vmnetwork.read()
+    if not vm['managed']:
+        return []
+    ok = vm['checked'] and vm['protected'] and vm['pfVerified']
+    return _item('net.vm_network', 'network',
+                 '固定代理与断网保护已核验' if ok else '虚拟机网络保护未通过',
+                 'pass' if ok else 'high', vm['message'])
+
+
 def check_transport(online: bool = True, state: dict | None = None) -> list[dict]:
     st = _transport_state() if state is None else state
     behavior = _dns_behavior(online)
@@ -1896,7 +2054,7 @@ def check_routing() -> dict:
     proxy_ips: set[str] = set()
     server_names: set[str] = set()
     tun_excludes: set[str] = set()
-    for root in _CLASH_ROOTS:
+    for root in (*_CLASH_ROOTS, *((Path('/usr/local/etc/mihomo'),) if vmnetwork.enabled() else ())):
         if not root.exists():
             continue
         try:
@@ -2204,6 +2362,10 @@ def check_ipv6(guard: dict | None = None) -> dict:
     都不构成泄漏面；系统有 v6 出口时，客户端还开着才说明这条链路更容易被
     实际走到。
     """
+    vm = vmnetwork.read()
+    if vm['managed'] and vm['checked'] and vm['protected'] and vm['pfVerified']:
+        return _item('net.ipv6', 'network', '虚拟机物理 IPv6 出站已由 pf 阻断', 'pass',
+                     '当前 pf 仅允许批准端点的 IPv4 TCP 与 DHCP；其它出站默认拒绝，不依赖 Wi-Fi 开关。')
     v6 = compat.ipv6_exposure()
     global6 = v6.get("sample") or []
     has_route6 = bool(v6.get("has_default_v6_route"))
@@ -2374,15 +2536,20 @@ def check_deep(net_info: dict | None = None) -> list[dict]:
         check_routing,
         check_transport,
         check_proxy_dns,
+        check_vm_network,
         check_proxy_fallback,
         check_proxy_drift,
         check_terminal_egress,
+        check_shell_env,
         check_mitm,
         check_ipv6,
         check_telemetry_files,
         check_versions,
     ]
     guard: dict | None = None
+    # 登录 shell 一次扫描只起一次：出口和环境变量是同一趟读出来的，
+    # 两个检查项共用。起两次既慢又可能读到两个不同瞬间的状态。
+    term: dict | None = None
     for fn in fns:
         try:
             if fn in (check_pinned, check_transport):
@@ -2391,8 +2558,10 @@ def check_deep(net_info: dict | None = None) -> list[dict]:
                 r = fn(bool((net_info or {}).get("available")))
             elif fn is check_proxy_dns:
                 r = fn(egress=net_info)
-            elif fn is check_terminal_egress:
-                r = fn(net_info)
+            elif fn in (check_terminal_egress, check_shell_env):
+                if term is None:
+                    term = _terminal_probe(net_info)
+                r = fn(net_info, term)
             elif fn in (check_proxy_fallback, check_proxy_drift, check_ipv6):
                 # 回落、漂移与 v6 读的是同一份客户端配置，一次扫描只读一遍。
                 if guard is None:

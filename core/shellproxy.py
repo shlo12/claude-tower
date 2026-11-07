@@ -25,14 +25,14 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import compat, domainegress, netprobe, retention
+from . import compat, domainegress, netprobe, retention, history
 
 BLOCK0 = "# >>> ccclean terminal proxy >>>"
 BLOCK1 = "# <<< ccclean terminal proxy <<<"
 STATE = Path.home() / ".ccclean/shellproxy.json"
 BACKUP_DIR = Path.home() / ".ccclean/backups"
 TRACE_URL = "https://api.anthropic.com/cdn-cgi/trace"
-UA = "ClaudeTower shellproxy"
+UA = "CCTower shellproxy"
 TIMEOUT = 8
 MAX_BYTES = 512 * 1024
 
@@ -87,7 +87,7 @@ def _block(port: int) -> str:
     proxy = f"http://127.0.0.1:{port}"
     return "\n".join([
         BLOCK0,
-        "# 由 Claude Tower 写入。删掉这两行注释之间的内容即可还原。",
+        "# 由 CC Tower 写入。删掉这两行注释之间的内容即可还原。",
         f'export http_proxy="{proxy}"',
         f'export https_proxy="{proxy}"',
         'export HTTP_PROXY="$http_proxy"',
@@ -307,7 +307,7 @@ def _port(value) -> int:
     return num
 
 
-def apply(port, verify: bool = True, prober=None) -> dict:
+def _apply(port, verify: bool = True, prober=None) -> dict:
     """把标记块追加到登录 shell 的 rc 文件末尾。"""
     if not compat.IS_MAC:
         raise ValueError("此功能仅支持 macOS")
@@ -349,7 +349,7 @@ def apply(port, verify: bool = True, prober=None) -> dict:
                        "新开的终端会生效，已经开着的终端要重开或手动 source。"}
 
 
-def undo() -> dict:
+def _undo() -> dict:
     saved, error = _read_state()
     if error:
         raise ValueError(error + "，未撤销")
@@ -371,3 +371,23 @@ def undo() -> dict:
         raise RuntimeError(f"从 {path.name} 移除标记块没有生效；原文件已备份，记录保留")
     STATE.unlink(missing_ok=True)
     return {**status(), "message": f"已从 {path.name} 移除本工具写入的代理变量。"}
+
+
+def apply(port, verify: bool = True, prober=None) -> dict:
+    try:
+        result = _apply(port, verify=verify, prober=prober)
+    except Exception as exc:
+        history.log("shellproxy.apply", ok=False, detail=type(exc).__name__)
+        raise
+    history.log("shellproxy.apply", target="终端代理变量", ok=True)
+    return result
+
+
+def undo() -> dict:
+    try:
+        result = _undo()
+    except Exception as exc:
+        history.log("shellproxy.undo", ok=False, detail=type(exc).__name__)
+        raise
+    history.log("shellproxy.undo", target="终端代理变量", ok=True)
+    return result

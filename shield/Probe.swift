@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CryptoKit
 
 /// 塔在分流修复后留下的「这批规则应该长什么样」。
 ///
@@ -17,13 +18,68 @@ struct RuleGuard: Codable {
 
 /// 一次巡检的快照。所有字段都只描述「这一刻」，不缓存任何历史判断——
 /// 上一次的结论留在 Store 里，这里的每个值都必须重新读。
+// 虚拟机专用状态由 root 任务写入；用户偏好或一个文件名不能作为安全证明。
+struct VMNetworkEvidence {
+    var checked = false
+    var protected = false
+    var pfVerified = false
+    var udpBlocked = false
+    var identity = ""
+    var policyHash = ""
+    var at: Double = 0
+    var fresh: Bool { checked && (-2...25).contains(Date().timeIntervalSince1970 - at) }
+    var issue: String? {
+        if !fresh { return "虚拟机网络保护未配置、未确认或已过期" }
+        if !pfVerified || !protected { return "固定代理或断网保护未通过，禁止启动 Claude" }
+        return nil
+    }
+    var session: SessionEvidence {
+        SessionEvidence(checked: issue == nil, mode: "rule", identity: identity + "|" + policyHash,
+                        error: issue ?? "")
+    }
+    static var enabled: Bool { Bundle.main.url(forResource: "vm-profile", withExtension: "json") != nil }
+    static func read() -> VMNetworkEvidence {
+        var out = VMNetworkEvidence()
+        let path = "/var/run/ccclean-vm-network.json"
+        guard let a = try? FileManager.default.attributesOfItem(atPath: path),
+              a[.type] as? FileAttributeType == .typeRegular,
+              (a[.ownerAccountID] as? NSNumber)?.intValue == 0,
+              let mode = a[.posixPermissions] as? NSNumber, mode.intValue & 0o022 == 0,
+              let size = a[.size] as? NSNumber, size.intValue <= 16384,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count <= 16384,
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = raw["version"] as? Int, version == 1,
+              let at = raw["at"] as? Double,
+              let protected = raw["protected"] as? Bool,
+              let pf = raw["pfVerified"] as? Bool,
+              let udp = raw["udpBlocked"] as? Bool else { return out }
+        out.checked = true; out.at = at; out.protected = protected
+        out.pfVerified = pf; out.udpBlocked = udp
+        out.identity = raw["identity"] as? String ?? ""
+        out.policyHash = raw["policyHash"] as? String ?? ""
+        if out.identity.count != 64 || out.policyHash.count != 64 { out.protected = false }
+        return out
+    }
+}
+
 struct Snapshot {
     var at = Date()
+    var strictFailure = ""
+    var strictNotice = ""
+    var domainConflict = false
+    var transportTLSFailure = false
+    var session = SessionEvidence()
     var connections = ConnectionAudit()
     var claudeRunning = false
     var tunUp = false
     var tunIface = ""
     var sysProxy = false
+    /// 上游代理模式（配置值随快照走）：本机看不到代理机制是正常的，
+    /// 准入改查结果型证据。放在快照里而不是每次回读配置——值守比对用的
+    /// 必须是「准入那一刻」的判定口径。
+    var upstream = false
+    var vmManaged = VMNetworkEvidence.enabled
+    var vmNetwork = VMNetworkEvidence()
     var proxyClients: [String] = []
     /// 认到了代理客户端，但既没 TUN 也没系统代理——这一刻流量是直连的。
     /// 和「什么都没认出来」不是一回事：那说明代理确实没开，这说明代理开着
@@ -102,6 +158,7 @@ struct Snapshot {
     /// Claude 没运行时，主状态只回答一件事：现在能不能启动。
     /// 出口和 DNS 不依赖基线，先判；时区与 UDP 必须有基线才判得了。
     var idleState: IdleState {
+        if !strictFailure.isEmpty { return .blocked }
         if connections.direct > 0 { return .blocked }
         if !exitReady { return .blocked }
         if dnsSuspect { return .blocked }
@@ -126,8 +183,15 @@ struct Snapshot {
     /// Tower 写入的基线时区与当前不一致，说明配置被改过（软件更新最常见）。
     var tzDrift: Bool { !baselineTz.isEmpty && !tz.isEmpty && tz != baselineTz }
 
-    /// 有没有一条「确定的」出口。TUN 或系统代理任一成立就算在位。
-    var exitReady: Bool { tunUp || sysProxy }
+    /// 本机模式看接管机制；上游模式必须先取得完整的结果证据。
+    /// 开启上游开关只允许发起探测，本身不代表已经验证了代理出口。
+    var exitReady: Bool {
+        (vmManaged || upstream) ? StrictSessionPolicy.contentIssue(self) == nil : tunUp || sysProxy
+    }
+
+    var shouldProbeNetwork: Bool {
+        vmManaged ? vmNetwork.issue == nil && tunUp : upstream || tunUp || sysProxy
+    }
 
     /// 出口在位，但 TUN 模式下 DNS 没拿到假地址。
     ///
@@ -140,11 +204,11 @@ struct Snapshot {
 
     /// 接管生效了，但真正解析域名的是国内解析器。
     ///
-    /// 只在 TUN 下判：系统代理本来就不接管 DNS，那条路必然落到系统解析器上，
+    /// 在本机 TUN 或上游代理下判：系统代理本来就不接管 DNS，那条路必然落到系统解析器上，
     /// 拿它报警等于对所有人常亮一盏黄灯。TUN 则承诺「DNS 我管了」——管到
     /// 国内解析器去，就是把访问过的域名交给了本地运营商。
     var dnsEgressSuspect: Bool {
-        tunUp && dnsResolverChecked && dnsResolverCountry == "CN"
+        (tunUp || upstream) && dnsResolverChecked && dnsResolverCountry == "CN"
     }
 
     /// UDP 出口和 HTTP 出口不是同一个——也就是 WebRTC 泄漏。
@@ -191,7 +255,9 @@ struct Snapshot {
 
     var verdict: Verdict {
         if !claudeRunning { return .idle }
+        if !strictFailure.isEmpty { return .danger }
         if connections.direct > 0 { return .danger }
+        if !strictNotice.isEmpty { return .warn }
         if exitReady {
             // 出口在位还要再看两眼：规则只做了一半的时候，主状态会显示
             // 「守护中」，但域名解析或 UDP 已经绕出去了。
@@ -216,6 +282,8 @@ struct Snapshot {
     /// 面板上那句话。dnsSuspect / stunLeak 时 verdict 都是 warn，但原因和
     /// 「出口存疑」不一样，用 Verdict 的固定文案会说错话，这里单独盖掉。
     var title: String {
+        if !strictFailure.isEmpty { return "戒严会话未通过" }
+        if !strictNotice.isEmpty { return "网络波动，正在复测" }
         // Claude 没在跑时，标题回答的是「现在能不能启动」。DNS / STUN 的异常
         // 只在「有人在被守」的时候才拿来当标题——否则会出现「Claude 未运行，
         // 标题却写着 UDP 出口不一致」，用户根本不知道该看哪一句。
@@ -230,7 +298,7 @@ struct Snapshot {
         if connections.direct > 0 { return "发现 Claude 公网物理路由" }
         if dnsSuspect { return "DNS 未接管" }
         if dnsEgressSuspect { return "DNS 解析出口在国内" }
-        if !stunExposed.isEmpty { return "WebRTC 在暴露真实地址" }
+        if !stunExposed.isEmpty { return "STUN 探测发现 WebRTC 风险" }
         if stunLeak { return "UDP 出口不一致" }
         // 带上 verdict 判断：升级标记只描述「曾经持续没接管」，
         // 出口回来了它可能还挂着，那时候标题必须跟着 verdict 走。
@@ -239,6 +307,8 @@ struct Snapshot {
     }
 
     var note: String {
+        if !strictFailure.isEmpty { return strictFailure }
+        if !strictNotice.isEmpty { return strictNotice }
         if !claudeRunning { return idleNote }
         if connections.direct > 0 { return connections.detail }
         if dnsSuspect {
@@ -252,7 +322,7 @@ struct Snapshot {
         if !stunExposed.isEmpty {
             let bad = stunExposed.map(Probe.maskIP).joined(separator: "、")
             return "国内 STUN 节点回了 \(bad)，和当前出口不是同一个。分流上这是正确答案，"
-                + "但浏览器的 ICE 候选是交给任何网页的，境外页面照样读得到——真实地址已经交出去了。"
+                + "使用同类 STUN 节点的网页可能取得该地址；实际 ICE 候选需在浏览器里实测确认。"
                 + "把 3478 / 5349 / 19302 的 UDP 直接拒掉最省事（塔的「置顶分流修复」里端口策略选「直接拒绝」）。"
         }
         if stunLeak {
@@ -272,7 +342,7 @@ struct Snapshot {
     private var idleNote: String {
         switch idleState {
         case .notower:
-            return "时区基线还没有（只有塔能建）：打开 Claude Tower 扫一次。出口基线哨兵会自己测，不用等塔。"
+            return "时区基线还没有（只有塔能建）：打开 CC Tower 扫一次。出口基线哨兵会自己测，不用等塔。"
         case .stale:
             if egressPending {
                 return "哨兵测到的出口和基线对不上，没有直接改。确认是你自己换了节点后，才会拿新出口继续比对 UDP。"
@@ -281,6 +351,7 @@ struct Snapshot {
         case .ready:
             return "当前环境正常：出口在位，DNS、UDP 出口和时区都对得上。可以启动 Claude 了。"
         case .blocked:
+            if vmManaged, let issue = StrictSessionPolicy.contentIssue(self) { return issue }
             if !exitReady {
                 return proxyClients.isEmpty
                     ? "现在没有任何出口：没看到 TUN，也没开系统代理。先开代理再启动 Claude，否则它的流量全走真实网络。"
@@ -377,7 +448,8 @@ enum Probe {
     static func run(baselineTz: String, egressMask: String = "", maskFresh: Bool = false,
                     egressPending: Bool = false, ruleGuard: RuleGuard? = nil,
                     forceStun: Bool = false, forceFresh: Bool = false,
-                    forceTransport: Bool = false, takeoverSince: TimeInterval = 0) -> Snapshot {
+                    forceTransport: Bool = false, takeoverSince: TimeInterval = 0,
+                    upstream: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.baselineTz = baselineTz
         s.egressMask = egressMask
@@ -391,10 +463,15 @@ enum Probe {
         s.tunIface = route.iface
         s.tunUp = route.tun
         s.sysProxy = systemProxyOn()
-        s.connections = ConnectionMonitor.run(tunActive: s.tunUp)
+        s.upstream = upstream && !s.vmManaged
+        if s.vmManaged { s.vmNetwork = VMNetworkEvidence.read() }
+        // 上游转发发生在网关之外，本机物理路由不能证明绕过了上游代理。
+        s.connections = s.upstream
+            ? ConnectionAudit(detail: "未确认：上游代理的后续路径无法由本机连接采样确认")
+            : ConnectionMonitor.run(tunActive: s.tunUp)
         // 「客户端在跑、但没接管」要持续一段才升级成危险。
         // takeoverSince 是第一次看到它的时刻（0 表示还没看到过）。
-        s.takeoverMissing = s.claudeRunning && !s.exitReady && !s.proxyClients.isEmpty
+        s.takeoverMissing = !s.vmManaged && !upstream && s.claudeRunning && !s.exitReady && !s.proxyClients.isEmpty
         s.takeoverEscalated = escalatedTakeover(missing: s.takeoverMissing,
                                                 since: takeoverSince, now: s.at)
         s.tz = currentTz()
@@ -409,13 +486,13 @@ enum Probe {
         s.guardDrift = guardCheck.drift
         s.guardName = ruleGuard?.name ?? ""
         s.guardMissing = guardCheck.missing
-        // 出口不在的时候绝不查 DNS、绝不打 STUN。
-        // 查一次就是把 claude.ai 明文送出去，打一次 STUN 就是把真实地址
-        // 送到对方服务器上——为了证明「没有泄漏」而制造一次泄漏，这种事不能做。
-        if s.exitReady {
+        // 普通模式没有本机接管机制时不发网络探测。
+        // 用户明确选择上游代理后，允许通过宿主机/网关取得结果证据；
+        // 开关不直接放行，证据不完整仍拒绝戒严准入。
+        if s.shouldProbeNetwork {
             // 缓存按「出口长什么样」分桶：换网卡、开关系统代理之后，
             // 旧结果描述的是另一条路，不能拿来充数。
-            let key = "\(s.tunUp)|\(s.sysProxy)|\(s.tunIface)"
+            let key = "\(s.upstream)|\(s.tunUp)|\(s.sysProxy)|\(s.tunIface)"
             let d = dnsProbe(force: forceFresh, idle: !s.claudeRunning,
                              key: key)
             s.dnsIP = d.ip
@@ -442,15 +519,17 @@ enum Probe {
             let tv = transportVerdict(tr)
             s.transportChecked = tr.checked
             s.transportState = tv.state
+            s.transportTLSFailure = tr.api.error == "tls" || tr.web.error == "tls"
             s.transportLabel = tv.label
             s.transportDetail = tv.detail
             s.transportAt = tr.at
             // Claude 自己的边缘节点看到的是谁。和传输诊断一样只描述这一刻，
             // 不进 verdict——这里要抓的是「两个域名走了不同的路」，
             // 而不是又一条能触发急停的证据。
-            let dr = domainEgressProbe(force: forceFresh, idle: !s.claudeRunning,
+            let dr = domainEgressProbe(force: forceFresh || s.claudeRunning, idle: !s.claudeRunning,
                                        key: key, mask: egressMask)
             let dv = domainEgressVerdict(dr, mask: egressMask, maskFresh: maskFresh)
+            s.transportTLSFailure = s.transportTLSFailure || dr.ai.error == "tls" || dr.com.error == "tls"
             s.domainChecked = dr.checked
             s.domainState = dv.state
             s.domainLabel = dv.label
@@ -461,12 +540,19 @@ enum Probe {
             // 两个域名报出不同地址时不采信——那说明分流把两条路分开了，
             // 拿其中任何一条当基线都会把另一条判成泄漏。
             let reached = [dr.ai, dr.com].filter { $0.reached }
+            s.domainConflict = Set(reached.map { $0.ip }).count > 1
             if let first = reached.first, reached.allSatisfy({ $0.ip == first.ip }) {
                 s.egressCandidateIP = first.ip
                 s.egressCandidateCountry = first.loc
             }
         } else {
             dropProbeCaches()
+        }
+        if s.vmManaged {
+            s.vmNetwork = VMNetworkEvidence.read()
+            s.session = s.vmNetwork.session
+        } else {
+            s.session = SessionController.read()
         }
         return s
     }
@@ -581,6 +667,21 @@ enum Probe {
         }
         guard let r = dest.range(of: "zoneinfo/") else { return TimeZone.current.identifier }
         return String(dest[r.upperBound...])
+    }
+
+    // MARK: - 虚拟化识别
+
+    /// 这台机器是不是虚拟机。只用于给「找不到本机代理」的提醒换一句说法，
+    /// 不参与判定：虚拟化 ≠ 上游接管，裸 VM 直连一样危险。
+    static func isVM() -> Bool {
+        var present: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("kern.hv_vmm_present", &present, &size, nil, 0) == 0, present == 1 { return true }
+        var buf = [CChar](repeating: 0, count: 128)
+        var blen = buf.count
+        guard sysctlbyname("hw.model", &buf, &blen, nil, 0) == 0 else { return false }
+        let model = String(cString: buf)
+        return ["Parallels", "VMware", "VirtualBox", "QEMU", "VirtualMac"].contains { model.hasPrefix($0) }
     }
 
     // MARK: - 读塔留下的设置
@@ -814,7 +915,7 @@ enum Probe {
         cfg.urlCache = nil
         cfg.httpShouldSetCookies = false
         cfg.httpCookieStorage = nil
-        cfg.httpAdditionalHeaders = ["User-Agent": "ClaudeShield dns-resolver-check",
+        cfg.httpAdditionalHeaders = ["User-Agent": "CCShield dns-resolver-check",
                                      "Accept": "application/json"]
         let session = URLSession(configuration: cfg)
         var req = URLRequest(url: url)
@@ -1067,7 +1168,9 @@ enum Probe {
             return "offline"
         case .cannotConnectToHost:
             return "connect"
-        case .secureConnectionFailed, .serverCertificateUntrusted,
+        case .secureConnectionFailed:
+            return "connect"
+        case .serverCertificateUntrusted,
              .serverCertificateHasBadDate, .serverCertificateNotYetValid,
              .serverCertificateHasUnknownRoot, .clientCertificateRejected:
             return "tls"
@@ -1195,7 +1298,7 @@ enum Probe {
         cfg.httpCookieStorage = nil
         // Probe 只依赖 Foundation（测试会把它单独编译），别在这里引用
         // ShieldApp 里的版本号。
-        cfg.httpAdditionalHeaders = ["User-Agent": "ClaudeShield transport-check"]
+        cfg.httpAdditionalHeaders = ["User-Agent": "CCShield transport-check"]
         let session = URLSession(configuration: cfg)
         var req = URLRequest(url: url)
         req.httpMethod = "HEAD"
@@ -1417,7 +1520,7 @@ enum Probe {
         cfg.httpShouldSetCookies = false
         cfg.httpCookieAcceptPolicy = .never
         cfg.httpCookieStorage = nil
-        cfg.httpAdditionalHeaders = ["User-Agent": "ClaudeShield domain-check"]
+        cfg.httpAdditionalHeaders = ["User-Agent": "CCShield domain-check"]
         let session = URLSession(configuration: cfg)
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
@@ -1720,5 +1823,272 @@ enum ConnectionMonitor {
             return ConnectionAudit(detail: "未确认：采样期间进程发生变化，等待下一轮")
         }
         return classify(rows, claude: claude, clients: clients, routes: routes, tunActive: tunActive)
+    }
+}
+
+// 戒严会话：准入证据和节点身份仅在内存中保留，日志不保存节点名或控制接口密钥。
+struct SessionEvidence {
+    var checked = false
+    var mode = ""
+    var identity = ""
+    var error = "未确认代理运行模式与节点"
+}
+
+/// 已准入会话的恢复期；普通 Mac 仅宽限传输/边缘查询，接管、节点、DNS、UDP 仍须明确通过。
+/// 只补齐未知的辅助证据作分类，不发布补齐快照，不变更原准入绑定。
+struct RuntimeRecovery {
+    static let grace: TimeInterval = 120
+    private(set) var since: TimeInterval?
+    mutating func reset() { since = nil }
+    mutating func evaluate(_ s: Snapshot, admitted: String?,
+                           now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> (stop: String?, notice: String) {
+        let issue = StrictSessionPolicy.runningIssue(s, admitted: admitted)
+        let stale = StrictSessionPolicy.staleIssue(s)
+        guard let binding = admitted, s.vmManaged || !s.upstream else {
+            reset(); return (issue ?? stale, "")
+        }
+        if s.connections.direct > 0 || s.domainConflict || s.transportTLSFailure {
+            reset(); return ("实际路径或 TLS 证书检查异常，请重新检查", "")
+        }
+        if issue == nil && stale == nil { reset(); return (nil, "") }
+        var evidence = s
+        if !s.vmManaged, stale != nil {
+            reset(); return ("检查耗时过长，无法确认当前接管状态，请重新检查", "")
+        }
+        let prefix = s.vmManaged
+            ? "vm|\(s.session.identity)|\(s.tunIface)|"
+            : "\(s.session.identity)|\(s.sysProxy)|\(s.tunUp)|\(s.tunIface)|"
+        guard s.connections.direct == 0, !s.domainConflict, !s.transportTLSFailure,
+              binding.hasPrefix(prefix) else {
+            reset(); return (issue ?? "网络路径证据发生变化", "")
+        }
+        let approvedIP = String(binding.dropFirst(prefix.count))
+        if !s.egressCandidateIP.isEmpty && s.egressCandidateIP != approvedIP {
+            reset(); return ("实际出口已变化，请退出后重新检查", "")
+        }
+        evidence.domainChecked = true; evidence.domainState = "ok"
+        if evidence.egressCandidateIP.isEmpty { evidence.egressCandidateIP = approvedIP }
+        evidence.transportChecked = true; evidence.transportState = "ok"
+        if s.vmManaged && !evidence.dnsChecked { evidence.dnsChecked = true; evidence.dnsFake = true }
+        guard StrictSessionPolicy.contentIssue(evidence) == nil,
+              StrictSessionPolicy.identity(evidence) == binding else {
+            reset(); return (issue ?? stale ?? "固定链路检查未通过", "")
+        }
+        if since == nil { since = now }
+        if now - (since ?? now) >= Self.grace {
+            reset(); return ("网络检查连续 120 秒未恢复，请恢复连接后重新检查", "")
+        }
+        return (nil, s.vmManaged
+            ? "固定链路保护仍在位；网络检查暂未完成，正在自动复测（最长 120 秒），不会因单次超时结束 Claude。"
+            : "代理、TUN 与节点检查仍通过；传输或边缘查询暂未完成，正在自动复测（最长 120 秒）。")
+    }
+}
+
+enum StrictSessionPolicy {
+    /// 只判「这份结论还新不新」。
+    ///
+    /// 过期说明这一轮没看清，不是用户做错了什么。两件事必须分开：准入时过期
+    /// 要拒绝（没证据就不放行），值守中过期只该结束本次使用、让人重新检查，
+    /// 不能升级成「违规」——违规会走到杀进程那一步，而「探测慢」和「出口不
+    /// 安全」完全不是一回事。`Snapshot.at` 是探测**开始**的时刻，会话、DNS、
+    /// UDP、传输、边缘各自串行等待，最坏路径加起来能到 40 秒以上，网络卡住
+    /// 时越过 45 秒是可能的。
+    static func staleIssue(_ s: Snapshot) -> String? {
+        if abs(Date().timeIntervalSince(s.at)) > 45 { return "检查结果已过期，请重新检查" }
+        return nil
+    }
+
+    static func admissionIssue(_ s: Snapshot) -> String? {
+        if let stale = staleIssue(s) { return stale }
+        return contentIssue(s)
+    }
+
+    /// 只看证据内容，不看它有多新。值守中用它，配合 `staleIssue` 分开处理。
+    static func contentIssue(_ s: Snapshot) -> String? {
+        if !s.towerFresh || s.egressPending { return "基线缺失、过期或出口待确认，请先在塔里检查" }
+        if s.vmManaged {
+            if let issue = s.vmNetwork.issue { return issue }
+            if !s.tunUp { return "指定的虚拟机 TUN 不在位" }
+            if !s.session.checked || s.session.identity.isEmpty { return "固定代理节点未确认" }
+            if !s.vmNetwork.udpBlocked { return "UDP 拒绝规则未核验" }
+            // 无 STUN 回包只有在 root 核验 pf 和运行中拒绝规则后才可接受。
+            if !s.stunAll.isEmpty { return "UDP 拒绝策略与实测回包不一致" }
+            // VM 的根信任是固定链路与 pf。递归解析器的国家属于附加元数据，
+            // 查询失败不能等同于直连；仍要求 DNS 实测及 fake-ip 接管明确成功。
+            if !s.dnsChecked || !s.dnsFake { return "虚拟机 DNS 接管证据未取得" }
+            if s.dnsSuspect || s.dnsEgressSuspect { return "DNS 检查未通过" }
+            if s.tz.isEmpty || s.tzDrift { return "时区检查未通过" }
+            if s.guardDrift || s.ipv6Drift { return "已记录设置发生变化" }
+            if !s.transportChecked || s.transportState != "ok" { return "传输探测未明确通过" }
+            if !s.domainChecked || s.domainState != "ok" || s.egressCandidateIP.isEmpty { return "Claude 边缘出口未明确通过" }
+            return nil
+        }
+        if s.upstream {
+            // 上游代理：代理机制在宿主机/网关上，本机不可见也要求不了。
+            // 准入换成「结果型」证据——上游真没接管好时，露馅的正是这几项：
+            // 边缘出口不一致、HTTPS 走不通、DNS 落到国内解析器、时区漂移。
+            // 直连审计和会话证据是查「本机客户端」的，上游模式下不适用。
+            if !s.stunChecked { return "UDP 关键证据未取得" }
+            if s.stunLeak || !s.stunExposed.isEmpty { return "UDP 路径检查未通过" }
+            if s.tz.isEmpty || s.tzDrift { return "时区检查未通过" }
+            if s.guardDrift || s.ipv6Drift { return "已记录设置发生变化" }
+            if !s.dnsChecked || !s.dnsResolverChecked || s.dnsResolverCountry.isEmpty { return "DNS 关键证据未取得" }
+            if s.dnsSuspect || s.dnsEgressSuspect { return "DNS 检查未通过" }
+            if !s.transportChecked || s.transportState != "ok" { return "传输探测未明确通过" }
+            if !s.domainChecked || s.domainState != "ok" || s.egressCandidateIP.isEmpty { return "Claude 边缘出口未明确通过" }
+            return nil
+        }
+        if !s.sysProxy || !s.tunUp {
+            // 虚拟机里看不到代理机制：流量被宿主机接管是正常拓扑，
+            // 给它指一条明路，而不是只留一句「缺系统代理」。
+            return Probe.isVM()
+                ? "未找到本机系统代理；虚拟机环境若由宿主机接管流量，请开启「上游代理」"
+                : "戒严要求系统代理和 TUN 同时在位"
+        }
+        if !s.session.checked { return s.session.error }
+        if s.session.mode != "global" { return "代理未处于全局模式" }
+        if s.session.identity.isEmpty { return "节点身份未确认" }
+        if s.connections.direct > 0 { return "发现 Claude 公网直连" }
+        if !s.dnsChecked || !s.dnsResolverChecked || s.dnsResolverCountry.isEmpty { return "DNS 关键证据未取得" }
+        if s.dnsSuspect || s.dnsEgressSuspect { return "DNS 检查未通过" }
+        if !s.stunChecked { return "UDP 关键证据未取得" }
+        if s.stunLeak || !s.stunExposed.isEmpty { return "UDP 路径检查未通过" }
+        if s.tz.isEmpty || s.tzDrift { return "时区检查未通过" }
+        if s.guardDrift || s.ipv6Drift { return "已记录设置发生变化" }
+        if !s.transportChecked || s.transportState != "ok" { return "传输探测未明确通过" }
+        if !s.domainChecked || s.domainState != "ok" || s.egressCandidateIP.isEmpty { return "Claude 边缘出口未明确通过" }
+        return nil
+    }
+    static func identity(_ s: Snapshot) -> String {
+        // 上游模式没有本机节点身份可比：绑定的是「准入那一刻的上游出口」，
+        // 只能发现出口地址发生变化；共用出口的节点切换无法由此区分。
+        if s.vmManaged { return "vm|\(s.session.identity)|\(s.tunIface)|\(s.egressCandidateIP)" }
+        if s.upstream { return "upstream|\(s.egressCandidateIP)" }
+        // 完整出口只用于内存比对；不同节点共用出口时仍用控制 API 的选择链区分。
+        return "\(s.session.identity)|\(s.sysProxy)|\(s.tunUp)|\(s.tunIface)|\(s.egressCandidateIP)"
+    }
+    static func runningIssue(_ s: Snapshot, admitted: String?) -> String? {
+        // 这里刻意不判「过期」：调用方先单独处理 staleIssue，过期只结束会话。
+        // 若这里也返回过期，它会被当成违规写进 strictFailure，接着 verdict
+        // 变 danger，然后 Claude 被终止——探测慢就成了「用户违规」。
+        if let issue = contentIssue(s) { return issue }
+        guard let admitted = admitted else { return "本次启动未获准入，请使用「检查并启动」" }
+        if identity(s) != admitted { return "网络配置、运行模式、节点选择或实际出口已变化，请退出后重新检查" }
+        return nil
+    }
+}
+
+private final class NoSessionRedirect: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+enum SessionController {
+    static func scalar(_ text: String, _ key: String) -> String {
+        for line in text.components(separatedBy: "\n") where !line.hasPrefix(" ") && !line.hasPrefix("\t") {
+            if line.hasPrefix(key + ":") {
+                let value = String(line.dropFirst(key.count + 1)).trimmingCharacters(in: .whitespaces)
+                if value.hasPrefix("\""), let d = value.data(using: .utf8),
+                   let decoded = try? JSONSerialization.jsonObject(with: d, options: .fragmentsAllowed) as? String { return decoded }
+                if value.hasPrefix("'"), value.hasSuffix("'") { return String(value.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'") }
+                return value.components(separatedBy: " #").first ?? ""
+            }
+        }
+        return ""
+    }
+    static func get(_ base: URL, _ path: String, secret: String) -> [String: Any]? {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.connectionProxyDictionary = [:]
+        cfg.timeoutIntervalForRequest = 1.5
+        cfg.timeoutIntervalForResource = 2
+        cfg.urlCache = nil
+        cfg.httpCookieStorage = nil
+        let client = URLSession(configuration: cfg, delegate: NoSessionRedirect(), delegateQueue: nil)
+        defer { client.invalidateAndCancel() }
+        var req = URLRequest(url: base.appendingPathComponent(path))
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        if !secret.isEmpty { req.setValue("Bearer " + secret, forHTTPHeaderField: "Authorization") }
+        let sem = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var result: [String: Any]?
+        let task = client.dataTask(with: req) { data, response, error in
+            defer { sem.signal() }
+            guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200,
+                  let data = data, data.count <= 2 * 1024 * 1024,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            lock.lock(); result = json; lock.unlock()
+        }
+        task.resume()
+        guard sem.wait(timeout: .now() + 2.2) == .success else { task.cancel(); return nil }
+        lock.lock(); defer { lock.unlock() }
+        return result
+    }
+    // 仅认可明确的代理选择链；负载均衡、未知策略或 DIRECT 一律不冒充已确认节点。
+    static func selection(_ proxies: [String: Any]) -> [String: String]? {
+        var selected: [String: String] = [:]
+        var seen = Set<String>()
+        var current = "GLOBAL"
+        for _ in 0..<32 {
+            if ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].contains(current.uppercased()) { return nil }
+            guard seen.insert(current).inserted, let item = proxies[current] as? [String: Any],
+                  let type = item["type"] as? String, !type.isEmpty else { return nil }
+            if let next = item["now"] as? String, !next.isEmpty { selected[current] = next; current = next; continue }
+            // all 存在代表策略组，缺 now 时无法确认它当前使用哪个成员。
+            guard item["all"] == nil, !["direct", "reject", "rejectdrop", "pass", "compatible", "loadbalance", "selector", "fallback", "urltest"].contains(type.lowercased()) else { return nil }
+            selected["__terminal"] = current
+            return selected
+        }
+        return nil
+    }
+    static func read(commands suppliedCommands: String? = nil,
+                     home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                     fetch: (URL, String, String) -> [String: Any]? = SessionController.get,
+                     proxyDescription: () -> String = { Probe.sh("/usr/sbin/scutil", ["--proxy"]) }) -> SessionEvidence {
+        let commands = (suppliedCommands ?? Probe.processList().joined(separator: "\n")).lowercased()
+        let active = [commands.contains("flclash"), commands.contains("clash-verge") || commands.contains("verge-mihomo"), commands.contains("mihomo-party")]
+        guard active.filter({ $0 }).count == 1 else {
+            return SessionEvidence(error: "无法确认唯一的受支持控制接口；节点会话锁当前支持 FlClash／Clash Verge／Mihomo Party")
+        }
+        let roots = active[0] ? ["com.follow.clash"] : (active[1] ? ["Clash Verge", "clash-verge", "io.github.clash-verge-rev.clash-verge-rev"] : ["mihomo-party"])
+        let dir = home.appendingPathComponent("Library/Application Support")
+        let names = roots.flatMap { root in ["work/config.yaml", "config.yaml", "clash-verge.yaml", "verge.yaml"].map { root + "/" + $0 } }
+        for name in names {
+            let file = dir.appendingPathComponent(name)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+                  let size = attrs[.size] as? NSNumber, size.intValue <= 2 * 1024 * 1024,
+                  let data = try? Data(contentsOf: file), data.count <= 2 * 1024 * 1024, let text = String(data: data, encoding: .utf8) else { continue }
+            var address = scalar(text, "external-controller")
+            if address.hasPrefix("0.0.0.0:") { address = "127.0.0.1:" + address.dropFirst(8) }
+            guard !address.isEmpty, let base = URL(string: "http://" + address),
+                  ["127.0.0.1", "localhost", "[::1]", "::1"].contains(base.host ?? ""),
+                  let port = base.port, port > 0, port < 65536,
+                  base.user == nil, base.password == nil, base.path.isEmpty else { continue }
+            let secret = scalar(text, "secret")
+            guard let config = fetch(base, "configs", secret),
+                  let mode = config["mode"] as? String,
+                  let raw = fetch(base, "proxies", secret),
+                  let proxies = raw["proxies"] as? [String: Any],
+                  let selected = selection(proxies),
+                  let tun = config["tun"] as? [String: Any], tun["enable"] as? Bool == true else {
+                return SessionEvidence(error: "控制接口未提供明确的 TUN／实际代理节点证据；请检查本地控制 API")
+            }
+            let proxy = proxyDescription()
+            guard !proxy.isEmpty,
+                  let canonical = try? JSONSerialization.data(withJSONObject: ["config": config, "selected": selected], options: .sortedKeys) else {
+                return SessionEvidence(error: "无法读取完整的代理配置证据")
+            }
+            // 保存摘要而非正文；密钥、节点名称与完整配置不会传给页面或落盘。
+            var combined = data
+            combined.append(canonical)
+            combined.append(Data(proxy.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.sorted().joined(separator: "\n").utf8))
+            return SessionEvidence(checked: true, mode: mode.lowercased(), identity: digest(combined), error: "")
+        }
+        return SessionEvidence(error: "未找到可读取的本机 HTTP 控制接口配置，无法锁定节点")
+    }
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

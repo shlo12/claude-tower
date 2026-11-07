@@ -24,7 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import compat, netcfg, netprobe, regioncfg
+from . import compat, history, netcfg, netprobe, regioncfg
 
 STATE = Path.home() / ".ccclean/align.json"
 ROWS = ("country", "timezone", "locale", "language")
@@ -310,8 +310,12 @@ def apply(keys, country: str = "", timezone: str = "", locale: str = "", languag
     done = [r for r in results if r["ok"] and not r["skipped"]]
     failed = [r for r in results if not r["ok"]]
     if failed and not done:
+        history.log("align.apply", target="出口对齐", ok=False,
+                    detail="；".join(f"{r['key']}：{r['message']}" for r in failed))
         raise RuntimeError("；".join(f"{r['key']}：{r['message']}" for r in failed))
     message = "；".join(r["message"] for r in results)
+    history.log("align.apply", target="出口对齐", ok=not failed,
+                detail="；".join(r["key"] for r in done) or "没有需要改的项")
     return {**status(with_network=False), "results": results, "message": message}
 
 
@@ -355,6 +359,10 @@ def restore() -> dict:
         done.append("预期国家已恢复")
 
     if failed:
+        history.log("align.restore", target="出口对齐", ok=False,
+                    detail="；".join(failed))
         raise RuntimeError("；".join(failed) + "；记录保留，可重试")
     STATE.unlink(missing_ok=True)
+    history.log("align.restore", target="出口对齐", ok=True,
+                detail="；".join(done) or "没有需要恢复的项")
     return {**status(with_network=False), "message": "；".join(done) or "没有需要恢复的项"}

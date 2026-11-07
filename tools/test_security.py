@@ -90,6 +90,7 @@ def main() -> int:
             ("/api/clean", {"ids": [], "confirm": "CLEAN"}),
             ("/api/timezone", {"tz": "UTC", "confirm": True}),
             ("/api/kill-claude", {}),
+            ("/api/control", {"action": "session-start", "confirm": True}),
             ("/api/quit", {}),
             ("/api/scan", {}),
             ("/api/profiles", {"name": "x"}),
@@ -103,6 +104,7 @@ def main() -> int:
             ("/api/probe/location", {"confirm": True}),
             ("/api/shellproxy", {"action": "apply", "port": 7890, "confirm": True}),
             ("/api/shellproxy", {"action": "plan", "port": 7890}),
+            ("/api/sessionapi", {"action": "apply", "confirm": True}),
         ]:
             code, _ = request("POST", path, headers={
                 "Host": f"127.0.0.1:{PORT}", "Origin": "http://evil.example",
@@ -110,7 +112,7 @@ def main() -> int:
             check(f"POST {path} 被拒", code == 403, f"返回 {code}")
 
         print("\n[3] 本机来源但没令牌（本地其它程序伪造）")
-        for path in ("/api/quit", "/api/clean", "/api/kill-claude"):
+        for path in ("/api/quit", "/api/clean", "/api/kill-claude", "/api/sessionapi", "/api/control"):
             code, _ = request("POST", path, headers={"Host": f"127.0.0.1:{PORT}"}, body={})
             check(f"POST {path} 被拒", code == 403, f"返回 {code}")
 
@@ -128,7 +130,7 @@ def main() -> int:
 
         print("\n[6] GET 也不能裸奔")
         for path in ("/api/scan", "/api/report", "/api/backups", "/api/tool/hosts-block",
-                     "/api/netcfg"):
+                     "/api/netcfg", "/api/control"):
             code, _ = request("GET", path, headers={"Host": f"127.0.0.1:{PORT}"})
             check(f"GET {path} 被拒", code == 403, f"返回 {code}")
 
@@ -145,6 +147,12 @@ def main() -> int:
                              body={"net": False})
         check("POST /api/scan 放行", code == 200, f"返回 {code}")
 
+        code, body = request("GET", "/api/control", headers=good)
+        check("带令牌可读守护状态", code == 200 and "fresh" in body)
+        code, _ = request("POST", "/api/control", headers=good, body={"action":"session-start"})
+        check("控制操作缺少确认被拒", code == 400)
+        code, _ = request("POST", "/api/control", headers=good, body={"action":"arbitrary-command","confirm":True})
+        check("控制动作白名单拒绝任意命令", code == 409)
         # net=False 必须连 ipcheck 都不跑：它会访问外部接口，
         # 这个开关正是测试用来避开真实网络的。
         src = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -156,7 +164,7 @@ def main() -> int:
               "ipcheck 仍在 net=False 分支里执行")
 
         print("\n[9] 静态资源不受影响")
-        for path in ("/", "/app.js", "/style.css"):
+        for path in ("/", "/app.js", "/style.css", "/guard.js"):
             code, _ = request("GET", path, headers={"Host": f"127.0.0.1:{PORT}"})
             check(f"GET {path} 正常", code == 200, f"返回 {code}")
 

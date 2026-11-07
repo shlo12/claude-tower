@@ -4,7 +4,7 @@
 #   默认只列出会被删的东西（不删）
 #   tools/clean-dist.sh -f     真的删
 #
-# 只认本工具自己的命名：ClaudeTower-<版本>-macOS / -windows-src 及其 .zip。
+# 只认本工具自己的命名：CCTower-<版本>-macOS / -windows-src 及其 .zip。
 # 别的东西一律不碰——dist/ 里可能还有你手动放进去的临时文件。
 set -eu
 
@@ -17,11 +17,12 @@ FORCE=0
 
 VER="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$DIR/app.py" | head -n 1)"
 [ -n "${VER:-}" ] || { echo "✗ 读不到 app.py 里的 VERSION"; exit 1; }
-KEEP="ClaudeTower-$VER-"
+KEEP="CCTower-$VER-"
 
-# 认两种命名：新的 ClaudeTower-<版本>-<平台>，和旧的 ClaudeTower-windows-src-v<版本>
-STALE="$(ls -1 "$DIST" | grep -E '^ClaudeTower-' | grep -v -F "$KEEP" || true)"
-JUNK="$(ls -1 "$DIST" | grep -E '^(\.DS_Store|Claude Tower .*)$' || true)"
+# 认三代命名：CCTower-<版本>-<平台>、CCTower-windows-src-v<版本>，
+# 以及改名前的历史包 ClaudeTower-*（同属本工具产物，可清）。
+STALE="$(ls -1 "$DIST" | grep -E '^(CCTower|ClaudeTower)-' | grep -v -F "$KEEP" || true)"
+JUNK="$(ls -1 "$DIST" | grep -E '^(\.DS_Store|CC Tower .*)$' || true)"
 
 if [ -z "$STALE$JUNK" ]; then
   echo "✓ dist/ 里只有当前版本 ${VER}，没有可清的"

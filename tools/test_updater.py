@@ -5,7 +5,7 @@
 当场用 zipfile 拼出来的。`codesign` 用一个只拦它自己的假 run 替代——
 真去签名假包既慢又不稳定，而「签名不过必须拒绝」这件事单独有用例。
 
-现在只有一个包：Claude Shield.app 嵌在 Claude Tower.app 的 Resources 里。
+现在只有一个包：CC Shield.app 嵌在 CC Tower.app 的 Resources 里。
 所有状态写在临时 HOME 下，跑完不影响 ~/.ccclean。
 """
 from __future__ import annotations
@@ -69,8 +69,8 @@ def tower_zip(version: str, shield_version: str) -> bytes:
             "CFBundleShortVersionString": version,
             "CFBundleExecutable": "CCclean",
         }
-        zf.writestr("Claude Tower.app/Contents/Info.plist", plistlib.dumps(tower_plist))
-        exe = zipfile.ZipInfo("Claude Tower.app/Contents/MacOS/CCclean")
+        zf.writestr("CC Tower.app/Contents/Info.plist", plistlib.dumps(tower_plist))
+        exe = zipfile.ZipInfo("CC Tower.app/Contents/MacOS/CCclean")
         exe.external_attr = (0o100755 << 16)
         zf.writestr(exe, b"#!/bin/sh\nexit 0\n")
         shield_plist = {
@@ -78,10 +78,10 @@ def tower_zip(version: str, shield_version: str) -> bytes:
             "CFBundleShortVersionString": shield_version,
             "CFBundleExecutable": "Shield",
         }
-        zf.writestr("Claude Tower.app/Contents/Resources/Claude Shield.app/Contents/Info.plist",
+        zf.writestr("CC Tower.app/Contents/Resources/CC Shield.app/Contents/Info.plist",
                     plistlib.dumps(shield_plist))
         sexe = zipfile.ZipInfo(
-            "Claude Tower.app/Contents/Resources/Claude Shield.app/Contents/MacOS/Shield")
+            "CC Tower.app/Contents/Resources/CC Shield.app/Contents/MacOS/Shield")
         sexe.external_attr = (0o100755 << 16)
         zf.writestr(sexe, b"#!/bin/sh\nexit 0\n")
     return buf.getvalue()
@@ -120,6 +120,15 @@ def real_tower(path: Path, version: str, shield_version: str) -> Path:
     """哨兵要先写进去再签外层：先签塔、后加资源会让外层签名当场失效。"""
     write_bundle(path, updater.TOWER_BUNDLE_ID, version, "CCclean")
     write_bundle(updater.nested_shield(path), updater.SHIELD_BUNDLE_ID,
+                 shield_version, "Shield")
+    sign_bundle(path)
+    return path
+
+
+def legacy_tower(path: Path, version: str, shield_version: str) -> Path:
+    """改名前部署的样子：塔目录和嵌套哨兵都还叫 Claude。"""
+    write_bundle(path, updater.TOWER_BUNDLE_ID, version, "CCclean")
+    write_bundle(updater.nested_shield_legacy(path), updater.SHIELD_BUNDLE_ID,
                  shield_version, "Shield")
     sign_bundle(path)
     return path
@@ -212,7 +221,7 @@ class UpdaterTests(unittest.TestCase):
             "minMacOS": min_os,
             "notes": "测试版本",
             "assets": {
-                "tower": {"name": "ClaudeTower.zip", "bytes": len(tower),
+                "tower": {"name": "CCTower.zip", "bytes": len(tower),
                           "sha256": hashlib.sha256(tower).hexdigest()},
             },
         }
@@ -228,7 +237,7 @@ class UpdaterTests(unittest.TestCase):
             "assets": [
                 {"name": "update-manifest.json", "size": len(json.dumps(manifest)),
                  "browser_download_url": f"{self.base}/update-manifest.json"},
-                {"name": "ClaudeTower.zip", "size": len(tower),
+                {"name": "CCTower.zip", "size": len(tower),
                  "browser_download_url": f"{self.base}/tower.zip"},
             ],
         }
@@ -315,9 +324,9 @@ class UpdaterTests(unittest.TestCase):
         result = updater.download(current_tower="1.0.0", current_shield="1.0.0")
         self.assertTrue(result["ok"])
         staged = updater._staged_path("2.0.0")
-        tower_exe = staged / "tower" / "Claude Tower.app" / "Contents" / "MacOS" / "CCclean"
-        shield_exe = (staged / "tower" / "Claude Tower.app" / "Contents" / "Resources"
-                      / "Claude Shield.app" / "Contents" / "MacOS" / "Shield")
+        tower_exe = staged / "tower" / "CC Tower.app" / "Contents" / "MacOS" / "CCclean"
+        shield_exe = (staged / "tower" / "CC Tower.app" / "Contents" / "Resources"
+                      / "CC Shield.app" / "Contents" / "MacOS" / "Shield")
         self.assertTrue(tower_exe.is_file())
         self.assertTrue(os.access(tower_exe, os.X_OK), "zipfile 解出来必须补回执行位")
         self.assertTrue(shield_exe.is_file(), "哨兵必须跟着塔一起进暂存目录")
@@ -351,7 +360,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_manifest_size_mismatch_is_rejected(self):
         self.publish(manifest_extra={"assets": {
-            "tower": {"name": "ClaudeTower.zip", "bytes": 1,
+            "tower": {"name": "CCTower.zip", "bytes": 1,
                       "sha256": hashlib.sha256(self.tower_zip).hexdigest()},
         }})
         updater.configure("o/r")
@@ -369,13 +378,13 @@ class UpdaterTests(unittest.TestCase):
     def test_zip_traversal_is_rejected(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("Claude Tower.app/Contents/Info.plist", b"x")
+            zf.writestr("CC Tower.app/Contents/Info.plist", b"x")
             zf.writestr("../evil.sh", b"x")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "bad.zip"
             src.write_bytes(buf.getvalue())
             with self.assertRaises(updater.UpdateError):
-                updater._safe_extract(src, Path(tmp) / "out", "Claude Tower.app")
+                updater._safe_extract(src, Path(tmp) / "out", "CC Tower.app")
 
     def test_wrong_bundle_version_is_rejected(self):
         bad = tower_zip("9.9.9", "1.5.0")
@@ -396,7 +405,7 @@ class UpdaterTests(unittest.TestCase):
         updater.check(force=True, current_tower="1.0.0")
         with self.assertRaises(updater.UpdateError) as ctx:
             updater.download(current_tower="1.0.0")
-        self.assertIn("Claude Shield.app", str(ctx.exception))
+        self.assertIn("CC Shield.app", str(ctx.exception))
         self.assertFalse(updater._staged_path("2.0.0").exists())
 
     def test_bad_signature_is_rejected(self):
@@ -427,8 +436,8 @@ class UpdaterTests(unittest.TestCase):
         plan = {
             "log": str(run_dir / "update.log"), "result": str(run_dir / "result.json"),
             "active": str(run_dir / "active.json"), "stamp": str(run_dir / "stamp"),
-            "tower_target": "/Applications/Claude Tower.app",
-            "tower_new": "/tmp/new/tower/Claude Tower.app",
+            "tower_target": "/Applications/CC Tower.app",
+            "tower_new": "/tmp/new/tower/CC Tower.app",
             "backup": str(run_dir / "backup"), "heartbeat": str(run_dir / "hb"),
             "runtime": str(run_dir / "runtime"), "stop_marker": str(run_dir / "stop"),
             "tower_version": "2.0.0", "shield_version": "1.5.0",
@@ -443,8 +452,15 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("move-old-tower", text)
         self.assertIn("rollback tower-not-starting", text)
         # 哨兵没有独立的安装目标：路径由塔算出来，换塔就等于换哨兵
-        self.assertIn('SHIELD="$TOWER/Contents/Resources/Claude Shield.app"', text)
+        self.assertIn('SHIELD="$TOWER/Contents/Resources/CC Shield.app"', text)
         self.assertNotIn("SHIELD_NEW", text)
+        # 改名前的部署：旧名嵌套哨兵也要停掉，旧名塔目录要归正
+        self.assertIn('SHIELDOLD="$TOWER/Contents/Resources/Claude Shield.app"',
+                      text)
+        self.assertIn('stop_identity "$SHIELDOLD/Contents/MacOS/Shield"', text)
+        self.assertIn("rename-target-exists", text)
+        self.assertIn("TOWER_ORIG", text)
+        self.assertIn("TOWER_FINAL", text)
         self.assertIn("missing-shield", text)
         self.assertIn("version-shield", text)
         # 过渡期可能有一个旧的独立哨兵在跑：按 pid 也停一次
@@ -469,14 +485,19 @@ class UpdaterTests(unittest.TestCase):
 
     # ---- 真跑安装脚本 ----
 
-    def _stage_and_targets(self, new_tower_version="2.0.0"):
+    def _stage_and_targets(self, new_tower_version="2.0.0", legacy=False):
         root = Path(tempfile.mkdtemp(prefix="ccclean-e2e-"))
         staged = updater._staged_path("2.0.0")
         shutil.rmtree(staged, ignore_errors=True)
-        real_tower(staged / "tower" / "Claude Tower.app", new_tower_version, "1.5.0")
+        real_tower(staged / "tower" / "CC Tower.app", new_tower_version, "1.5.0")
         updater._save({"staged": {"version": "2.0.0", "shieldVersion": "1.5.0",
                                   "at": int(time.time()), "dir": "update-staging/2.0.0"}})
-        target = real_tower(root / "Applications" / "Claude Tower.app", "1.0.0", "1.0.0")
+        if legacy:
+            target = legacy_tower(root / "Applications" / "Claude Tower.app",
+                                  "1.0.0", "1.0.0")
+        else:
+            target = real_tower(root / "Applications" / "CC Tower.app",
+                                "1.0.0", "1.0.0")
         return root, target
 
     def _install_sync(self, target: Path):
@@ -510,7 +531,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self._version(updater.nested_shield(target)), "1.5.0")
         backups = list(updater.BACKUP_DIR.iterdir())
         self.assertEqual(len(backups), 1)
-        self.assertEqual(self._version(backups[0] / "Claude Tower.app.new"), "1.0.0")
+        self.assertEqual(self._version(backups[0] / "CC Tower.app.new"), "1.0.0")
         state = updater.status("2.0.0", "1.5.0")
         self.assertTrue(state["lastInstall"]["ok"])
         self.assertIsNone(state["staged"])
@@ -530,11 +551,55 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(leftovers, [])
         shutil.rmtree(root, ignore_errors=True)
 
+    def test_real_script_renames_legacy_target_dir(self):
+        # 改名前部署：塔叫 Claude Tower.app、嵌套哨兵叫 Claude Shield.app，
+        # 装完新版后目录名要归正到 CC Tower.app。
+        root, target = self._stage_and_targets(legacy=True)
+        self._install_sync(target)
+        final = target.parent / "CC Tower.app"
+        self.assertFalse(target.exists())
+        self.assertEqual(self._version(final), "2.0.0")
+        self.assertEqual(self._version(updater.nested_shield(final)), "1.5.0")
+        state = updater.status("2.0.0", "1.5.0")
+        self.assertTrue(state["lastInstall"]["ok"])
+        leftovers = [p.name for p in target.parent.iterdir() if ".ccclean-" in p.name]
+        self.assertEqual(leftovers, [])
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_real_script_rolls_back_to_original_legacy_path(self):
+        # 装失败时恢复的是原路径——指向旧名字的启动项才不会失联。
+        root, target = self._stage_and_targets(new_tower_version="9.9.9",
+                                               legacy=True)
+        self._install_sync(target)
+        self.assertTrue(target.exists())
+        self.assertEqual(self._version(target), "1.0.0")
+        self.assertEqual(self._version(updater.nested_shield_legacy(target)),
+                         "1.0.0")
+        self.assertFalse((target.parent / "CC Tower.app").exists())
+        state = updater.status("1.0.0", "1.0.0")
+        self.assertFalse(state["lastInstall"]["ok"])
+        leftovers = [p.name for p in target.parent.iterdir() if ".ccclean-" in p.name]
+        self.assertEqual(leftovers, [])
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_real_script_refuses_to_clobber_existing_new_name(self):
+        # Claude Tower.app 旁边已经有一个 CC Tower.app：宁可不装，
+        # 也不能把别人放在那个位置的东西挪走。
+        root, target = self._stage_and_targets(legacy=True)
+        occupied = real_tower(target.parent / "CC Tower.app", "3.0.0", "3.0.0")
+        self._install_sync(target)
+        self.assertEqual(self._version(target), "1.0.0")
+        self.assertEqual(self._version(occupied), "3.0.0")
+        state = updater.status("1.0.0", "1.0.0")
+        self.assertFalse(state["lastInstall"]["ok"])
+        self.assertIn("另一个 CC Tower.app", state["lastInstall"]["reasonText"])
+        shutil.rmtree(root, ignore_errors=True)
+
     def test_install_plan_uses_backup_and_running_bundle(self):
         updater.configure("o/r")
         updater.check(force=True, current_tower="1.0.0")
         updater.download(current_tower="1.0.0")
-        tower_app = Path(tempfile.mkdtemp(prefix="ccclean-tower-")) / "Claude Tower.app"
+        tower_app = Path(tempfile.mkdtemp(prefix="ccclean-tower-")) / "CC Tower.app"
         tower_app.mkdir()
         spawned = {}
         real_popen = subprocess.Popen

@@ -133,7 +133,7 @@ CASES = [
     ("shield-notower", "只装了 Shield，没有塔的基线", {
         "verdict": "idle", "title": "先让塔扫描一次",
         "note": "哨兵手上没有塔的基线：时区漂移和 UDP 出口都没法比对。"
-                "先打开 Claude Tower 扫一次，数据会自动接上。",
+                "先打开 CC Tower 扫一次，数据会自动接上。",
         "claude": False, "tun": True, "tunIface": "utun4", "sysProxy": False,
         "dns": "198.18.2.160", "dnsFake": True, "dnsChecked": True, "dnsSuspect": False,
         "stun": ["5.34.*.136"], "stunForeign": ["5.34.*.136"],

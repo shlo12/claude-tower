@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// 与 Tower 共用的状态文件。
 ///
@@ -27,12 +28,88 @@ struct Config: Codable {
     var interval = 30
     /// 暂停到这个时间戳之前不再巡检
     var pausedUntil: Double = 0
+    /// 上游代理模式：本机没有代理客户端、系统代理或 TUN，流量由宿主机或
+    /// 网关透明接管——最典型的就是虚拟机（流量走宿主机 TUN 出网）。开着时
+    /// 戒严不再查本机代理机制，准入改成看「结果型」证据：Claude 边缘出口、
+    /// HTTPS 传输、DNS 证据、时区。这些是上游没接管好时最后会露馅的地方。
+    var upstream = false
     var hits: [Hit] = []
     /// 塔写下的分流规则清单。Shield 只读，每次巡检重新核对这些规则还在不在。
     var ruleGuard: RuleGuard?
     /// 用户想不想开机自启。nil 是老版本留下的文件：按「已装 plist」补，
     /// 不替用户猜一个他从来没选过的偏好。
     var loginIntent: Bool?
+    /// 最近一轮巡检的结论。
+    ///
+    /// 塔只在自己被按下时看一眼世界，中间发生的事它一概不知道；哨兵每十秒
+    /// 看一次，却只有菜单栏那一小块地方能说话。两边各说各的，用户拿到的是
+    /// 两个互不相干的答案。这一份就是给塔读的：塔扫的时候顺手带上「哨兵
+    /// 刚才看到了什么」，同一个问题只给一个结论。
+    ///
+    /// 只写结论与打码后的地址。完整地址连磁盘都不该碰。
+    var live: Live?
+
+    struct Live: Codable {
+        var sessionState: String?
+        var sessionMessage: String?
+        var at: Double = 0
+        /// idle / safe / warn / danger。和菜单栏显示的是同一个词。
+        var verdict = ""
+        var title = ""
+        var note = ""
+        var claudeRunning = false
+        var exitReady = false
+        var directConnections = 0
+        var takeoverMissing = false
+        var tzDrift = false
+        var dnsSuspect = false
+        var dnsEgressSuspect = false
+        var stunLeak = false
+        var stunExposed: [String] = []
+        var ruleDrift = false
+        var ruleMissing: [String] = []
+        var ipv6Drift = false
+        var transportState = ""
+        var domainState = ""
+        var domainLabel = ""
+
+        /// 从一次巡检快照造出要落盘的那份结论。
+        ///
+        /// 抽成静态方法是为了让 `--probe-dump` 也能用它。两处各写一遍字段
+        /// 映射的话，以后加一个标志位只改了其中一处，另一处就静默地少一个
+        /// 字段——而这里少一个字段，塔那边就少一条判据，没人会发现。
+        static func maskAddress(_ ip: String) -> String {
+            if ip.contains(":") {
+                return ip.split(separator: ":").prefix(2).joined(separator: ":") + ":****"
+            }
+            let parts = ip.split(separator: ".")
+            guard parts.count == 4 else { return "未知地址" }
+            return "\(parts[0]).\(parts[1]).*.\(parts[3])"
+        }
+
+        /// 和上一份比，有没有实质变化（时间戳不算）。
+        /// 没变就不写盘，两分钟补一次心跳——塔靠时间戳判断哨兵还活着没有。
+        func differs(from old: Live) -> Bool {
+            old.sessionState != sessionState
+                || old.sessionMessage != sessionMessage
+                || old.verdict != verdict
+                || old.claudeRunning != claudeRunning
+                || old.exitReady != exitReady
+                || old.directConnections != directConnections
+                || old.takeoverMissing != takeoverMissing
+                || old.tzDrift != tzDrift
+                || old.dnsSuspect != dnsSuspect
+                || old.dnsEgressSuspect != dnsEgressSuspect
+                || old.stunLeak != stunLeak
+                || old.stunExposed != stunExposed
+                || old.ruleDrift != ruleDrift
+                || old.ruleMissing != ruleMissing
+                || old.domainLabel != domainLabel
+                || old.ipv6Drift != ipv6Drift
+                || old.transportState != transportState
+                || old.domainState != domainState
+        }
+    }
 
     struct Hit: Codable {
         var ts: Double
@@ -59,9 +136,11 @@ struct Config: Codable {
         clients = (try? c.decodeIfPresent([String].self, forKey: .clients)) ?? []
         interval = (try? c.decodeIfPresent(Int.self, forKey: .interval)) ?? 30
         pausedUntil = (try? c.decodeIfPresent(Double.self, forKey: .pausedUntil)) ?? 0
+        upstream = (try? c.decodeIfPresent(Bool.self, forKey: .upstream)) ?? false
         hits = (try? c.decodeIfPresent([Hit].self, forKey: .hits)) ?? []
         ruleGuard = try? c.decodeIfPresent(RuleGuard.self, forKey: .ruleGuard)
         loginIntent = try? c.decodeIfPresent(Bool.self, forKey: .loginIntent)
+        live = try? c.decodeIfPresent(Live.self, forKey: .live)
         // 巡检周期设下限：1 秒一次会把 ps/netstat 变成常驻负载
         if interval < 5 { interval = 5 }
         if level == 3 { level = 2 } // 旧 L3 合并到严格模式；旧 L2 保持为 2
@@ -121,7 +200,17 @@ enum Store {
                         ruleGuard: cfg.ruleGuard)
     }
 
+    private static func lockState() -> Int32? {
+        ensureDir()
+        let fd = open(dir.appendingPathComponent("shield-state.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return nil }
+        guard flock(fd, LOCK_EX) == 0 else { close(fd); return nil }
+        return fd
+    }
+
     static func save(_ cfg: Config) {
+        guard let stateFD = lockState() else { return }
+        defer { flock(stateFD, LOCK_UN); close(stateFD) }
         var trimmed = cfg
         if trimmed.hits.count > maxHits {
             trimmed.hits = Array(trimmed.hits.suffix(maxHits))
@@ -236,6 +325,8 @@ enum Store {
     @discardableResult
     static func recordEgress(_ cfg: inout Config, mask: String, country: String,
                              at: Double) -> EgressUpdate {
+        guard let stateFD = lockState() else { return .skipped }
+        defer { flock(stateFD, LOCK_UN); close(stateFD) }
         // 塔可能刚扫过，比内存里的新。先把它并进来再判，免得用旧基线做决定。
         // 只并塔写的那几个键：读坏了就跳过，不能拿默认值把内存里的基线清空。
         if let data = try? Data(contentsOf: fileURL),

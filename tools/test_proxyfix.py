@@ -18,6 +18,22 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import proxyfix
 
+
+def setUpModule():
+    """测试绝不能写用户的真实操作日志——那是用户唯一的一份回溯依据。"""
+    global _HIST_PATCH, _HIST_TMP
+    import tempfile
+    from unittest import mock
+    from core import history
+    _HIST_TMP = tempfile.mkdtemp()
+    _HIST_PATCH = mock.patch.object(history, "LOG",
+                                    __import__("pathlib").Path(_HIST_TMP) / "history.jsonl")
+    _HIST_PATCH.start()
+
+
+def tearDownModule():
+    _HIST_PATCH.stop()
+
 def _isolate_shield_state(test, root):
     """分流修复会顺手把规则清单写给哨兵。
 
@@ -858,6 +874,20 @@ class DnsFixTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             proxyfix.apply("dns-delete")
         self.assertIn("未知操作", str(ctx.exception))
+
+
+class FailureLogTests(unittest.TestCase):
+    def test_failures_keep_action_and_direction(self):
+        for action, key in (("dns", "dns.apply"), ("dns-undo", "dns.undo"),
+                            ("undo", "rules.undo")):
+            with patch.object(proxyfix.compat, "IS_MAC", True), \
+                 patch.object(proxyfix, "_state_guard"), \
+                 patch.object(proxyfix, "_dispatch", side_effect=RuntimeError("test")), \
+                 patch.object(proxyfix.history, "log") as log:
+                with self.assertRaises(RuntimeError):
+                    proxyfix.apply(action)
+                self.assertEqual(log.call_args.args[0], "proxyfix." + key)
+                self.assertFalse(log.call_args.kwargs["ok"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+using System;
+using System.IO;
+using System.Reflection;
+using System.Windows.Forms;
+namespace CCShieldWindows {
+static class Installer {
+ static void CopyTree(string from,string to){Directory.CreateDirectory(to);foreach(string file in Directory.GetFiles(from)){if((File.GetAttributes(file)&FileAttributes.ReparsePoint)!=0)throw new IOException("不接受链接文件");File.Copy(file,Path.Combine(to,Path.GetFileName(file)),true);}foreach(string sub in Directory.GetDirectories(from)){if((File.GetAttributes(sub)&FileAttributes.ReparsePoint)!=0)throw new IOException("不接受链接目录");CopyTree(sub,Path.Combine(to,Path.GetFileName(sub)));}}
+ static void Shortcut(string path,string target){object shell=null,link=null;try{shell=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));link=shell.GetType().InvokeMember("CreateShortcut",BindingFlags.InvokeMethod,null,shell,new object[]{path});link.GetType().InvokeMember("TargetPath",BindingFlags.SetProperty,null,link,new object[]{target});link.GetType().InvokeMember("WorkingDirectory",BindingFlags.SetProperty,null,link,new object[]{Path.GetDirectoryName(target)});link.GetType().InvokeMember("Save",BindingFlags.InvokeMethod,null,link,null);}finally{if(link!=null)System.Runtime.InteropServices.Marshal.FinalReleaseComObject(link);if(shell!=null)System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell);}}
+ internal static void Install(){try{string source=AppDomain.CurrentDomain.BaseDirectory;string destination=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CCTower","App");if(!File.Exists(Path.Combine(source,"app.py"))||!File.Exists(Path.Combine(source,"runtime","python","python.exe")))throw new IOException("请先完整解压 Windows 分发包");if(String.Equals(source.TrimEnd(Path.DirectorySeparatorChar),destination,StringComparison.OrdinalIgnoreCase))throw new IOException("程序已在用户应用目录，无需重复安装");
+ Directory.CreateDirectory(destination);foreach(string name in new[]{"WindowsShield.exe","CC Tower.bat","Install.cmd","LICENSE","THIRD_PARTY_NOTICES.md","app.py"})File.Copy(Path.Combine(source,name),Path.Combine(destination,name),true);foreach(string name in new[]{"core","web","runtime","windows","tools"}){string p=Path.Combine(source,name);if(Directory.Exists(p))CopyTree(p,Path.Combine(destination,name));}
+ string executable=Path.Combine(destination,"WindowsShield.exe");Shortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"CC Shield.lnk"),executable);Shortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs),"CC Shield.lnk"),executable);MessageBox.Show("已安装到当前用户的应用目录，并创建桌面与开始菜单快捷方式。\n双击 CC Shield 即可使用；未开启自启动。","安装完成");
+ }catch(Exception e){MessageBox.Show("安装未完成："+e.Message+"\n更新前请退出正在运行的 Windows 哨兵。原设置保留。","CC Shield");Environment.ExitCode=1;}}
+}
+}
